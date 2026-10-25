@@ -176,6 +176,7 @@ typedef struct {
     float semitones;
     float targetSemitones;
     float pitchRatio;
+    float targetPitchRatio;
 
     // Reverb parameters
     float roomSize;
@@ -191,10 +192,6 @@ typedef struct {
 } ReverbDSP;
 
 static ReverbDSP g_dsp;
-
-// Thread-local deduplication state to prevent processing the same buffer twice
-static __thread void *s_dedupBuffer = NULL;
-static __thread UInt32 s_dedupFrames = 0;
 
 static inline float SoftClip(float x) {
     if (x > 3.0f) return 1.0f;
@@ -224,20 +221,22 @@ static inline void ProcessSampleStereo(ReverbDSP *dsp, float inL, float inR, flo
     dsp->wet += 0.005f * (dsp->targetWet - dsp->wet);
     dsp->dry += 0.005f * (dsp->targetDry - dsp->dry);
 
-    if (dsp->targetSemitones != dsp->semitones) {
-        dsp->semitones += 0.01f * (dsp->targetSemitones - dsp->semitones);
-        dsp->pitchRatio = powf(2.0f, dsp->semitones / 12.0f);
+    // Fast pitch smoothing without transcendental powf() in the per-sample loop
+    if (fabsf(dsp->targetPitchRatio - dsp->pitchRatio) > 0.0001f) {
+        dsp->pitchRatio += 0.002f * (dsp->targetPitchRatio - dsp->pitchRatio);
+        dsp->semitones += 0.002f * (dsp->targetSemitones - dsp->semitones);
     }
 
     // 2. Pitch Shifter (Dual dual-head overlapping windowed delay)
     float pInL = inL;
     float pInR = inR;
 
-    if (fabsf(dsp->semitones) > 0.01f) {
+    if (fabsf(dsp->pitchRatio - 1.0f) > 0.005f) {
         dsp->pitchBufL[dsp->pitchWriteIdx] = inL;
         dsp->pitchBufR[dsp->pitchWriteIdx] = inR;
 
-        float windowSize = 2048.0f;
+        // 1024-sample window (23.2 ms at 44.1 kHz) eliminates low-frequency flutter/tremolo
+        float windowSize = 1024.0f;
         float halfWindow = windowSize * 0.5f;
 
         float off0 = dsp->pitchPhase;
@@ -278,11 +277,14 @@ static inline void ProcessSampleStereo(ReverbDSP *dsp, float inL, float inR, flo
     }
 
     // 3. Parallel Comb Filters
+    // Attenuate input by 0.20f (1 / COMB_COUNT) to prevent IIR resonant gain overload and clipping distortion
+    float combInL = pInL * 0.20f;
+    float combInR = pInR * 0.20f;
     float combSumL = 0.0f;
     float combSumR = 0.0f;
     for (int i = 0; i < COMB_COUNT; ++i) {
-        combSumL += ProcessComb(&dsp->combL[i], pInL, dsp->roomSize, dsp->damping);
-        combSumR += ProcessComb(&dsp->combR[i], pInR, dsp->roomSize, dsp->damping);
+        combSumL += ProcessComb(&dsp->combL[i], combInL, dsp->roomSize, dsp->damping);
+        combSumR += ProcessComb(&dsp->combR[i], combInR, dsp->roomSize, dsp->damping);
     }
 
     // 4. Series Allpass Filters
@@ -303,13 +305,6 @@ static inline void ProcessSampleStereo(ReverbDSP *dsp, float inL, float inR, flo
 
 static inline void ProcessAudioBufferList(ReverbDSP *dsp, UInt32 inNumberFrames, AudioBufferList *ioData) {
     if (!dsp || !ioData || inNumberFrames == 0 || !dsp->enabled) return;
-
-    void *firstBuf = (ioData->mNumberBuffers > 0) ? ioData->mBuffers[0].mData : NULL;
-    if (firstBuf && firstBuf == s_dedupBuffer && inNumberFrames == s_dedupFrames) {
-        return; // Already processed in this exact audio quantum
-    }
-    s_dedupBuffer = firstBuf;
-    s_dedupFrames = inNumberFrames;
 
     if (ioData->mNumberBuffers >= 2) {
         float *bufL = (float *)ioData->mBuffers[0].mData;
@@ -352,12 +347,6 @@ static inline void ProcessAudioBufferList(ReverbDSP *dsp, UInt32 inNumberFrames,
 
 static inline void ProcessRawAudioBytes(ReverbDSP *dsp, void *data, UInt32 numFrames, const AudioStreamBasicDescription *asbd) {
     if (!dsp || !data || numFrames == 0 || !asbd || !dsp->enabled) return;
-
-    if (data == s_dedupBuffer && numFrames == s_dedupFrames) {
-        return; // Already processed
-    }
-    s_dedupBuffer = data;
-    s_dedupFrames = numFrames;
 
     if (asbd->mFormatFlags & kAudioFormatFlagIsFloat) {
         if (asbd->mChannelsPerFrame >= 2) {
@@ -485,13 +474,6 @@ static void MyAudioQueueProcessingTapCallback(
     );
 
     if (status == noErr && ioData != NULL && outNumberFrames != NULL && *outNumberFrames > 0 && g_dsp.enabled) {
-        static uint32_t s_tapFramesCount = 0;
-        if (s_tapFramesCount < 10) {
-            s_tapFramesCount++;
-            IGLog("[AQ Tap Callback #%u] Rendered %u frames, bufs=%u, data0=%p",
-                  s_tapFramesCount, (unsigned int)*outNumberFrames, (unsigned int)ioData->mNumberBuffers,
-                  (ioData->mNumberBuffers > 0) ? ioData->mBuffers[0].mData : NULL);
-        }
         ProcessAudioBufferList(&g_dsp, *outNumberFrames, ioData);
     }
 }
@@ -588,9 +570,6 @@ static void (*orig_FNF_tapCallback)(id, SEL, AudioQueueProcessingTapRef, UInt32,
 static void swizzled_FNF_tapCallback(id self, SEL _cmd, AudioQueueProcessingTapRef tap, UInt32 sourceFlags, AudioBufferList *ioData, UInt32 numFrames) {
     if (orig_FNF_tapCallback) {
         orig_FNF_tapCallback(self, _cmd, tap, sourceFlags, ioData, numFrames);
-    }
-    if (g_dsp.enabled && ioData != NULL && numFrames > 0) {
-        ProcessAudioBufferList(&g_dsp, numFrames, ioData);
     }
 }
 
@@ -711,24 +690,14 @@ static OSStatus MyMTAudioProcessingTapGetSourceAudio(
     CMTimeRange *timeRangeOut,
     CMItemCount *numberFramesOut
 ) {
-    OSStatus status = noErr;
     if (real_MTAudioProcessingTapGetSourceAudio) {
-        status = real_MTAudioProcessingTapGetSourceAudio(
-            tap, numberFrames, bufferListInOut, flagsOut, timeRangeOut, numberFramesOut
-        );
-    } else {
-        status = MTAudioProcessingTapGetSourceAudio(
+        return real_MTAudioProcessingTapGetSourceAudio(
             tap, numberFrames, bufferListInOut, flagsOut, timeRangeOut, numberFramesOut
         );
     }
-
-    if (status == noErr && bufferListInOut != NULL && g_dsp.enabled) {
-        UInt32 frames = (numberFramesOut != NULL) ? (UInt32)*numberFramesOut : (UInt32)numberFrames;
-        if (frames > 0 && bufferListInOut->mNumberBuffers > 0 && bufferListInOut->mBuffers[0].mData != NULL) {
-            ProcessAudioBufferList(&g_dsp, frames, bufferListInOut);
-        }
-    }
-    return status;
+    return MTAudioProcessingTapGetSourceAudio(
+        tap, numberFrames, bufferListInOut, flagsOut, timeRangeOut, numberFramesOut
+    );
 }
 
 // ============================================================================
@@ -751,14 +720,10 @@ static OSStatus WrappedRenderCallback(void *inRefCon,
                                       UInt32 inNumberFrames,
                                       AudioBufferList *ioData) {
     RenderCallbackWrapper *w = (RenderCallbackWrapper *)inRefCon;
-    OSStatus status = noErr;
     if (w && w->origProc) {
-        status = w->origProc(w->origRefCon, ioActionFlags, inTimeStamp, inBusNumber, inNumberFrames, ioData);
+        return w->origProc(w->origRefCon, ioActionFlags, inTimeStamp, inBusNumber, inNumberFrames, ioData);
     }
-    if (status == noErr && ioData != NULL && inNumberFrames > 0 && g_dsp.enabled) {
-        ProcessAudioBufferList(&g_dsp, inNumberFrames, ioData);
-    }
-    return status;
+    return noErr;
 }
 
 static OSStatus MyAudioUnitSetProperty(AudioUnit inUnit,
@@ -809,21 +774,14 @@ static OSStatus MyAudioUnitRender(AudioUnit inUnit,
                                   UInt32 inOutputBusNumber,
                                   UInt32 inNumberFrames,
                                   AudioBufferList *ioData) {
-    OSStatus status = noErr;
     if (real_AudioUnitRender) {
-        status = real_AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
-    } else {
-        status = AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
+        return real_AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
     }
-
-    if (status == noErr && ioData != NULL && inNumberFrames > 0 && g_dsp.enabled) {
-        ProcessAudioBufferList(&g_dsp, inNumberFrames, ioData);
-    }
-    return status;
+    return AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
 }
 
 // ============================================================================
-// TIER 5: CoreAudio AudioQueue Enqueue Buffer Interception (Direct PCM Streams)
+// TIER 5: CoreAudio AudioQueue Enqueue Buffer Interception (Queue Registration)
 // ============================================================================
 static OSStatus MyAudioQueueEnqueueBufferWithParameters(
     AudioQueueRef inAQ,
@@ -839,16 +797,6 @@ static OSStatus MyAudioQueueEnqueueBufferWithParameters(
 ) {
     if (inAQ) {
         EnsureAudioQueueTapped(inAQ);
-    }
-
-    if (g_dsp.enabled && inBuffer && inBuffer->mAudioData && inBuffer->mAudioDataByteSize > 0 && inNumPacketDescs == 0) {
-        AudioStreamBasicDescription asbd;
-        UInt32 propSize = sizeof(asbd);
-        OSStatus err = AudioQueueGetProperty(inAQ, kAudioQueueProperty_StreamDescription, &asbd, &propSize);
-        if (err == noErr && asbd.mFormatID == kAudioFormatLinearPCM && asbd.mBytesPerFrame > 0) {
-            UInt32 numFrames = inBuffer->mAudioDataByteSize / asbd.mBytesPerFrame;
-            ProcessRawAudioBytes(&g_dsp, inBuffer->mAudioData, numFrames, &asbd);
-        }
     }
 
     if (real_AudioQueueEnqueueBufferWithParameters) {
@@ -871,16 +819,6 @@ static OSStatus MyAudioQueueEnqueueBuffer(AudioQueueRef inAQ,
                                           const AudioStreamPacketDescription *inPacketDescs) {
     if (inAQ) {
         EnsureAudioQueueTapped(inAQ);
-    }
-
-    if (g_dsp.enabled && inBuffer && inBuffer->mAudioData && inBuffer->mAudioDataByteSize > 0 && inNumPacketDescs == 0) {
-        AudioStreamBasicDescription asbd;
-        UInt32 propSize = sizeof(asbd);
-        OSStatus err = AudioQueueGetProperty(inAQ, kAudioQueueProperty_StreamDescription, &asbd, &propSize);
-        if (err == noErr && asbd.mFormatID == kAudioFormatLinearPCM && asbd.mBytesPerFrame > 0) {
-            UInt32 numFrames = inBuffer->mAudioDataByteSize / asbd.mBytesPerFrame;
-            ProcessRawAudioBytes(&g_dsp, inBuffer->mAudioData, numFrames, &asbd);
-        }
     }
 
     if (real_AudioQueueEnqueueBuffer) {
@@ -1013,6 +951,7 @@ void InstagramReverb_SetPitch(float semitones) {
     if (semitones < -4.0f) semitones = -4.0f;
     if (semitones > 4.0f) semitones = 4.0f;
     g_dsp.targetSemitones = semitones;
+    g_dsp.targetPitchRatio = powf(2.0f, semitones / 12.0f);
     pthread_mutex_unlock(&g_dsp.lock);
 }
 
@@ -1117,6 +1056,7 @@ static void InstagramReverbInit(void) {
     g_dsp.semitones = 0.0f;
     g_dsp.targetSemitones = 0.0f;
     g_dsp.pitchRatio = 1.0f;
+    g_dsp.targetPitchRatio = 1.0f;
     g_dsp.pitchPhase = 0.0f;
     g_dsp.pitchWriteIdx = 0;
     g_dsp.enabled = true;

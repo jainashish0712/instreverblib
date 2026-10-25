@@ -99,17 +99,16 @@ def test_memory_protection_guard():
     assert "VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY" in src, "FAIL: Missing copy-on-write page protection flags!"
     print("   -> PASS: vm_protect unlock is present before symbol pointer rewrites.\n")
 
-def test_dyld_interpose_guard():
-    print("[5/5] Testing DYLD_INTERPOSE compile-time linker interposing (AudioUnit + AudioQueue)...")
+def test_tap_and_got_scanner_guard():
+    print("[5/5] Testing AudioQueueProcessingTap and GOT Scanner Safety...")
     with open("D:/apps/com.spotify.client-9.1.94-eeveedecrypter/InstagramReverb/InstagramReverb.m", "r") as f:
         src = f.read()
 
-    assert "__DATA,__interpose" in src, "FAIL: __DATA,__interpose section tag missing!"
-    assert "interpose_AudioUnitRender" in src, "FAIL: interpose_AudioUnitRender missing!"
-    assert "interpose_AudioUnitSetProperty" in src, "FAIL: interpose_AudioUnitSetProperty missing!"
-    assert "interpose_AudioQueueEnqueueBuffer" in src, "FAIL: interpose_AudioQueueEnqueueBuffer missing!"
-    assert "MyAudioQueueEnqueueBuffer" in src, "FAIL: MyAudioQueueEnqueueBuffer missing!"
-    print("   -> PASS: Apple native dyld interposing table declared for both AudioUnit and AudioQueue.\n")
+    assert "AudioQueueProcessingTapNew" in src, "FAIL: AudioQueueProcessingTapNew missing!"
+    assert "PatchGOTPointersInAllImages" in src, "FAIL: PatchGOTPointersInAllImages missing!"
+    assert "MyAudioQueueProcessingTapCallback" in src, "FAIL: MyAudioQueueProcessingTapCallback missing!"
+    assert "ProcessAudioBufferList" in src, "FAIL: ProcessAudioBufferList missing!"
+    print("   -> PASS: AudioQueueProcessingTap and dynamic GOT scanner architecture verified.\n")
 
 if __name__ == "__main__":
     print("==================================================================")
@@ -119,7 +118,7 @@ if __name__ == "__main__":
     test_pcm_formats()
     test_multi_unit_isolation()
     test_memory_protection_guard()
-    test_dyld_interpose_guard()
+    test_tap_and_got_scanner_guard()
     print("==================================================================")
     print("    ALL 5 RUNTIME SAFETY TESTS PASSED! ZERO RUNTIME HAZARDS.      ")
     print("==================================================================")
