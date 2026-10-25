@@ -15,23 +15,27 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Compile InstagramReverb.dylib
         run: |
           chmod +x build.sh
           ./build.sh
 
-      - name: Publish Direct Raw Dylib (Rolling 'latest' Tag - No Zip)
+      - name: Publish Direct Raw Dylib (Rolling 'latest' Release - No Zip)
         if: github.event_name == 'push'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: "Latest Development Build"
-          body: "Continuous build of InstagramReverb.dylib (raw uncompressed binary for LiveContainer)."
-          prerelease: false
-          files: InstagramReverb.dylib
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f latest HEAD
+          git push origin -f tag latest
+          gh release delete latest --yes || true
+          gh release create latest InstagramReverb.dylib \
+            --title "Latest Development Build" \
+            --notes "Continuous build of InstagramReverb.dylib (raw uncompressed binary for LiveContainer)."
 
       - name: Upload Dylib Artifact (Fallback)
         uses: actions/upload-artifact@v4
