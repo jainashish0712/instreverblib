@@ -661,14 +661,8 @@ static void InstagramReverbInit(void) {
     g_dsp.pitchWriteIdx = 0;
     g_dsp.enabled = true;
 
-    // Resolve system function pointers via dlsym to guarantee zero recursion
-    real_AudioUnitRender = (OSStatus (*)(AudioUnit, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt32, UInt32, AudioBufferList *))dlsym(RTLD_DEFAULT, "AudioUnitRender");
-    real_AudioUnitSetProperty = (OSStatus (*)(AudioUnit, AudioUnitPropertyID, AudioUnitScope, AudioUnitElement, const void *, UInt32))dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
-    real_AudioQueueEnqueueBuffer = (OSStatus (*)(AudioQueueRef, AudioQueueBufferRef, UInt32, const AudioStreamPacketDescription *))dlsym(RTLD_DEFAULT, "AudioQueueEnqueueBuffer");
-    real_AudioQueueEnqueueBufferWithParameters = (OSStatus (*)(AudioQueueRef, AudioQueueBufferRef, UInt32, const AudioStreamPacketDescription *, UInt32, UInt32, const AudioQueueParameterEvent *, const AudioTimeStamp *, AudioTimeStamp *))dlsym(RTLD_DEFAULT, "AudioQueueEnqueueBufferWithParameters");
-    real_MTAudioProcessingTapGetSourceAudio = (OSStatus (*)(MTAudioProcessingTapRef, CMItemCount, AudioBufferList *, MTAudioProcessingTapFlags *, CMTimeRange *, CMItemCount *))dlsym(RTLD_DEFAULT, "MTAudioProcessingTapGetSourceAudio");
-
     // Runtime symbol rebinding with fishhook for AudioUnit, AudioQueue, and MediaToolbox
+    // fishhook atomically populates real_* with the true underlying system function pointers.
     struct rebinding rebindings[] = {
         {"AudioUnitRender", (void *)MyAudioUnitRender, (void **)&real_AudioUnitRender},
         {"AudioUnitSetProperty", (void *)MyAudioUnitSetProperty, (void **)&real_AudioUnitSetProperty},
