@@ -5,7 +5,7 @@ echo "Building InstagramReverb.dylib for arm64 iOS..."
 
 SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "")
 
-FRAMEWORKS="-framework Foundation -framework AudioToolbox -framework MediaToolbox -framework CoreMedia -framework UIKit -framework CoreGraphics -framework QuartzCore -framework MediaPlayer"
+FRAMEWORKS="-framework Foundation -framework AVFoundation -framework AudioToolbox -framework MediaToolbox -framework CoreMedia -framework UIKit -framework CoreGraphics -framework QuartzCore -framework MediaPlayer"
 
 if [ -n "$SDK_PATH" ]; then
     xcrun -sdk iphoneos clang -dynamiclib -arch arm64 -arch arm64e \

@@ -1,20 +1,32 @@
 // InstagramReverb.m
 // High-Performance Audio DSP Tweak for Instagram (com.burbn.instagram)
 // Features: Real-time Pitch Shifting (-4 to +4 st) & Studio-Grade Reverb Engine
-// Multi-Tier Interception via Safe Runtime Symbol Rebinding (fishhook & dyld):
-//   1. CoreAudio AudioUnit Render & SetProperty (AVAudioEngine & Unit Nodes)
-//   2. CoreAudio AudioQueue Enqueue Buffer with Parameters (Meta FNFPlayer)
-//   3. CoreAudio AudioQueue Standard Enqueue Buffer (Direct PCM Streams)
-//   4. MediaToolbox MTAudioProcessingTap (AVPlayer Video Tracks)
+//
+// Multi-Tier Interception Engine:
+//   Tier 1: CoreAudio AudioQueue Processing Tap (Decoded PCM from Meta FNFPlayer)
+//   Tier 2: Meta FNFCoreAudioWrapper Objective-C Tap Callback Swizzle
+//   Tier 3: MediaToolbox MTAudioProcessingTap (AVPlayer / AVPlayerItem Video Tracks)
+//   Tier 4: CoreAudio AudioUnit Render & SetProperty (AVAudioEngine & Unit Nodes)
+//   Tier 5: CoreAudio AudioQueue Enqueue Buffer (Direct Uncompressed PCM Streams)
+//
+// Dual Rebinding Technology:
+//   A. Direct GOT Scanner: Bypasses LC_DYLD_CHAINED_FIXUPS limitations in FBSharedFramework
+//   B. CydiaSubstrate MSHookFunction: In-memory inline function prologue interception
+//   C. fishhook: Traditional Mach-O symbol table rebinding
 
 #import <Foundation/Foundation.h>
+#import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <MediaToolbox/MediaToolbox.h>
 #import <CoreMedia/CoreMedia.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
 #import <dlfcn.h>
 #import <pthread.h>
 #import <mach/mach.h>
 #import <mach/vm_map.h>
+#import <mach-o/dyld.h>
+#import <mach-o/loader.h>
 #import <execinfo.h>
 #import <signal.h>
 #import <unistd.h>
@@ -22,6 +34,18 @@
 #import <time.h>
 #import "InstagramReverb.h"
 #import "fishhook.h"
+
+#ifdef __LP64__
+typedef struct mach_header_64 mach_header_t;
+typedef struct segment_command_64 segment_command_t;
+typedef struct section_64 section_t;
+#define LC_SEGMENT_ARCH_DEPENDENT LC_SEGMENT_64
+#else
+typedef struct mach_header mach_header_t;
+typedef struct segment_command segment_command_t;
+typedef struct section section_t;
+#define LC_SEGMENT_ARCH_DEPENDENT LC_SEGMENT
+#endif
 
 // ============================================================================
 // Runtime File-Based Diagnostic Logger & Crash Reporter
@@ -38,7 +62,7 @@ static void IGLog(const char *format, ...) {
     vsnprintf(msg, sizeof(msg), format, args);
     va_end(args);
 
-    // 1. Console / os_log / syslog
+    // 1. Console / os_log
     NSLog(@"[InstagramReverb] %s", msg);
 
     // 2. Thread-safe persistent file logging
@@ -56,7 +80,7 @@ static void IGLog(const char *format, ...) {
     pthread_mutex_unlock(&g_logMutex);
 }
 
-// POSIX Signal Handler for SIGSEGV, SIGBUS, SIGABRT, SIGILL
+// POSIX Signal Handler for hardware faults
 static void SignalCrashHandler(int sig, siginfo_t *info, void *context) {
     const char *sigName = (sig == SIGSEGV) ? "SIGSEGV (Segmentation Fault)" :
                           (sig == SIGBUS)  ? "SIGBUS (Bus Error / Bad Memory Access)" :
@@ -98,62 +122,55 @@ static void SignalCrashHandler(int sig, siginfo_t *info, void *context) {
     }
 
     signal(sig, SIG_DFL);
-    raise(sig);
 }
 
 static void UncaughtExceptionHandler(NSException *exception) {
-    int fd = open(g_crashFilePath[0] ? g_crashFilePath : "/tmp/InstagramReverb_crash.log",
-                  O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd >= 0) {
-        char buf[1024];
-        int len = snprintf(buf, sizeof(buf),
-            "\n==================================================================\n"
-            "UNCAUGHT OBJC EXCEPTION: %s\n"
-            "Reason: %s\n"
-            "Call Stack:\n",
-            [exception.name UTF8String],
-            [exception.reason UTF8String]);
-        write(fd, buf, len);
-        for (NSString *symbol in exception.callStackSymbols) {
-            char symBuf[512];
-            int slen = snprintf(symBuf, sizeof(symBuf), "  %s\n", [symbol UTF8String]);
-            write(fd, symBuf, slen);
-        }
-        write(fd, "==================================================================\n", 67);
-        fsync(fd);
-        close(fd);
+    IGLog("[CRASH] Uncaught NSException: %s Reason: %s",
+          [exception.name UTF8String] ?: "Unknown",
+          [exception.reason UTF8String] ?: "None");
+    NSArray *stack = [exception callStackSymbols];
+    for (NSString *frame in stack) {
+        IGLog("  %s", [frame UTF8String]);
     }
 }
 
-#define PITCH_BUFFER_SIZE 4096
-#define PITCH_GRAIN_SIZE  2048.0f
-
+// ============================================================================
+// DSP Architecture: Schroeder-Moorer Reverb + Time-Domain Pitch Shifter
+// ============================================================================
 #define COMB_COUNT 4
 #define ALLPASS_COUNT 2
+#define PITCH_BUF_SIZE 4096
+#define PITCH_BUF_MASK (PITCH_BUF_SIZE - 1)
 
-#define MAX_COMB_LEN 1600
-#define MAX_ALLPASS_LEN 600
+static const int kCombLengthsL[COMB_COUNT] = {1116, 1188, 1277, 1356};
+static const int kCombLengthsR[COMB_COUNT] = {1139, 1211, 1300, 1379};
+static const int kAllpassLengthsL[ALLPASS_COUNT] = {556, 441};
+static const int kAllpassLengthsR[ALLPASS_COUNT] = {579, 464};
 
-// Internal Comb Filter State
 typedef struct {
-    float buffer[MAX_COMB_LEN];
+    float buffer[1600];
     int bufSize;
     int bufIdx;
-    float filterStore;
+    float store;
 } CombFilter;
 
-// Internal Allpass Filter State
 typedef struct {
-    float buffer[MAX_ALLPASS_LEN];
+    float buffer[600];
     int bufSize;
     int bufIdx;
 } AllpassFilter;
 
-// Unified Reverb & Pitch DSP Engine
 typedef struct {
-    // Pitch Shifter Circular Buffers & State
-    float pitchBufL[PITCH_BUFFER_SIZE];
-    float pitchBufR[PITCH_BUFFER_SIZE];
+    pthread_mutex_t lock;
+
+    CombFilter combL[COMB_COUNT];
+    CombFilter combR[COMB_COUNT];
+    AllpassFilter allpassL[ALLPASS_COUNT];
+    AllpassFilter allpassR[ALLPASS_COUNT];
+
+    // Pitch Shifter state
+    float pitchBufL[PITCH_BUF_SIZE];
+    float pitchBufR[PITCH_BUF_SIZE];
     int pitchWriteIdx;
     float pitchPhase;
 
@@ -161,13 +178,7 @@ typedef struct {
     float targetSemitones;
     float pitchRatio;
 
-    // Freeverb Delay Networks
-    CombFilter combL[COMB_COUNT];
-    CombFilter combR[COMB_COUNT];
-    AllpassFilter allpassL[ALLPASS_COUNT];
-    AllpassFilter allpassR[ALLPASS_COUNT];
-
-    // Reverb Parameters
+    // Reverb parameters
     float roomSize;
     float damping;
     float wet;
@@ -178,33 +189,20 @@ typedef struct {
     float targetDry;
 
     bool enabled;
-    pthread_mutex_t lock;
 } ReverbDSP;
 
 static ReverbDSP g_dsp;
 
-// Stereo delay buffer tuning lengths
-static const int kCombLengthsL[COMB_COUNT] = {1116, 1188, 1277, 1356};
-static const int kCombLengthsR[COMB_COUNT] = {1139, 1211, 1300, 1379};
-static const int kAllpassLengthsL[ALLPASS_COUNT] = {225, 556};
-static const int kAllpassLengthsR[ALLPASS_COUNT] = {248, 579};
-
-// ----------------------------------------------------------------------------
-// Fast Soft-Limiter (Prevents Digital Clipping)
-// ----------------------------------------------------------------------------
 static inline float SoftClip(float x) {
-    if (x > 1.0f) return 1.0f;
-    if (x < -1.0f) return -1.0f;
-    return x - (0.10f * x * x * x);
+    if (x > 3.0f) return 1.0f;
+    if (x < -3.0f) return -1.0f;
+    return x * (27.0f + x * x) / (27.0f + 9.0f * x * x);
 }
 
-// ----------------------------------------------------------------------------
-// Comb & Allpass Filter Processing
-// ----------------------------------------------------------------------------
 static inline float ProcessComb(CombFilter *cf, float input, float feedback, float damp) {
     float output = cf->buffer[cf->bufIdx];
-    cf->filterStore = (output * (1.0f - damp)) + (cf->filterStore * damp);
-    cf->buffer[cf->bufIdx] = input + (cf->filterStore * feedback);
+    cf->store = (output * (1.0f - damp)) + (cf->store * damp);
+    cf->buffer[cf->bufIdx] = input + (cf->store * feedback);
     if (++cf->bufIdx >= cf->bufSize) cf->bufIdx = 0;
     return output;
 }
@@ -217,105 +215,93 @@ static inline float ProcessAllpass(AllpassFilter *af, float input) {
     return output;
 }
 
-// ----------------------------------------------------------------------------
-// Dual-Tap Circular Buffer Pitch Shifter (100% Tempo Invariant)
-// ----------------------------------------------------------------------------
-static inline void ProcessPitchStereo(ReverbDSP *dsp, float *ioL, float *ioR) {
-    int wIdx = dsp->pitchWriteIdx;
-    dsp->pitchBufL[wIdx] = *ioL;
-    dsp->pitchBufR[wIdx] = *ioR;
-
-    if (fabsf(dsp->semitones) < 0.01f) {
-        dsp->pitchWriteIdx = (wIdx + 1) % PITCH_BUFFER_SIZE;
-        return;
-    }
-
-    float p1 = dsp->pitchPhase;
-    float p2 = p1 + 0.5f;
-    if (p2 >= 1.0f) p2 -= 1.0f;
-
-    // Hann window crossfade
-    float w1 = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * p1));
-    float w2 = 1.0f - w1;
-
-    // Tap 1
-    float d1 = p1 * PITCH_GRAIN_SIZE;
-    float r1 = (float)wIdx - d1;
-    if (r1 < 0.0f) r1 += (float)PITCH_BUFFER_SIZE;
-    int i1 = (int)r1;
-    int next1 = (i1 + 1) % PITCH_BUFFER_SIZE;
-    float f1 = r1 - (float)i1;
-    float s1L = (1.0f - f1) * dsp->pitchBufL[i1] + f1 * dsp->pitchBufL[next1];
-    float s1R = (1.0f - f1) * dsp->pitchBufR[i1] + f1 * dsp->pitchBufR[next1];
-
-    // Tap 2
-    float d2 = p2 * PITCH_GRAIN_SIZE;
-    float r2 = (float)wIdx - d2;
-    if (r2 < 0.0f) r2 += (float)PITCH_BUFFER_SIZE;
-    int i2 = (int)r2;
-    int next2 = (i2 + 1) % PITCH_BUFFER_SIZE;
-    float f2 = r2 - (float)i2;
-    float s2L = (1.0f - f2) * dsp->pitchBufL[i2] + f2 * dsp->pitchBufL[next2];
-    float s2R = (1.0f - f2) * dsp->pitchBufR[i2] + f2 * dsp->pitchBufR[next2];
-
-    *ioL = (s1L * w1) + (s2L * w2);
-    *ioR = (s1R * w1) + (s2R * w2);
-
-    // Advance write and phase
-    dsp->pitchWriteIdx = (wIdx + 1) % PITCH_BUFFER_SIZE;
-    dsp->pitchPhase += (1.0f - dsp->pitchRatio) / PITCH_GRAIN_SIZE;
-    if (dsp->pitchPhase >= 1.0f) dsp->pitchPhase -= 1.0f;
-    else if (dsp->pitchPhase < 0.0f) dsp->pitchPhase += 1.0f;
-}
-
-// ----------------------------------------------------------------------------
-// Core Sample Processor: Pitch Shift -> Freeverb Stereo Delay Network
-// ----------------------------------------------------------------------------
 static inline void ProcessSampleStereo(ReverbDSP *dsp, float inL, float inR, float *outL, float *outR) {
-    // 1. Parameter Smoothing (Zipper-free transitions)
-    const float kSmooth = 0.005f;
-    dsp->roomSize += (dsp->targetRoomSize - dsp->roomSize) * kSmooth;
-    dsp->wet += (dsp->targetWet - dsp->wet) * kSmooth;
-    dsp->dry += (dsp->targetDry - dsp->dry) * kSmooth;
+    // 1. Parameter Smoothing (Anti-zipper filter)
+    dsp->roomSize += 0.005f * (dsp->targetRoomSize - dsp->roomSize);
+    dsp->wet += 0.005f * (dsp->targetWet - dsp->wet);
+    dsp->dry += 0.005f * (dsp->targetDry - dsp->dry);
 
-    if (fabsf(dsp->targetSemitones - dsp->semitones) > 0.001f) {
-        dsp->semitones += (dsp->targetSemitones - dsp->semitones) * kSmooth;
+    if (dsp->targetSemitones != dsp->semitones) {
+        dsp->semitones += 0.01f * (dsp->targetSemitones - dsp->semitones);
         dsp->pitchRatio = powf(2.0f, dsp->semitones / 12.0f);
     }
 
-    // 2. Pitch Shifter (100% tempo invariant)
-    float curL = inL;
-    float curR = inR;
-    ProcessPitchStereo(dsp, &curL, &curR);
+    // 2. Pitch Shifter (Dual dual-head overlapping windowed delay)
+    float pInL = inL;
+    float pInR = inR;
 
-    // 3. Freeverb Schroeder-Moorer Delay Network
-    float inputMono = (curL + curR) * 0.5f * 0.015f;
-    float outCombL = 0.0f;
-    float outCombR = 0.0f;
+    if (fabsf(dsp->semitones) > 0.01f) {
+        dsp->pitchBufL[dsp->pitchWriteIdx] = inL;
+        dsp->pitchBufR[dsp->pitchWriteIdx] = inR;
 
+        float windowSize = 2048.0f;
+        float halfWindow = windowSize * 0.5f;
+
+        float off0 = dsp->pitchPhase;
+        float off1 = dsp->pitchPhase + halfWindow;
+        if (off1 >= windowSize) off1 -= windowSize;
+
+        float w0 = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * off0 / windowSize));
+        float w1 = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * off1 / windowSize));
+
+        float readIdx0 = (float)dsp->pitchWriteIdx - off0;
+        float readIdx1 = (float)dsp->pitchWriteIdx - off1;
+
+        while (readIdx0 < 0.0f) readIdx0 += (float)PITCH_BUF_SIZE;
+        while (readIdx1 < 0.0f) readIdx1 += (float)PITCH_BUF_SIZE;
+
+        int i0_0 = (int)readIdx0 & PITCH_BUF_MASK;
+        int i0_1 = (i0_0 + 1) & PITCH_BUF_MASK;
+        float frac0 = readIdx0 - (float)((int)readIdx0);
+
+        int i1_0 = (int)readIdx1 & PITCH_BUF_MASK;
+        int i1_1 = (i1_0 + 1) & PITCH_BUF_MASK;
+        float frac1 = readIdx1 - (float)((int)readIdx1);
+
+        float sL0 = dsp->pitchBufL[i0_0] + frac0 * (dsp->pitchBufL[i0_1] - dsp->pitchBufL[i0_0]);
+        float sR0 = dsp->pitchBufR[i0_0] + frac0 * (dsp->pitchBufR[i0_1] - dsp->pitchBufR[i0_0]);
+
+        float sL1 = dsp->pitchBufL[i1_0] + frac1 * (dsp->pitchBufL[i1_1] - dsp->pitchBufL[i1_0]);
+        float sR1 = dsp->pitchBufR[i1_0] + frac1 * (dsp->pitchBufR[i1_1] - dsp->pitchBufR[i1_0]);
+
+        pInL = (sL0 * w0) + (sL1 * w1);
+        pInR = (sR0 * w0) + (sR1 * w1);
+
+        dsp->pitchPhase += (1.0f - dsp->pitchRatio);
+        while (dsp->pitchPhase >= windowSize) dsp->pitchPhase -= windowSize;
+        while (dsp->pitchPhase < 0.0f) dsp->pitchPhase += windowSize;
+
+        dsp->pitchWriteIdx = (dsp->pitchWriteIdx + 1) & PITCH_BUF_MASK;
+    }
+
+    // 3. Parallel Comb Filters
+    float combSumL = 0.0f;
+    float combSumR = 0.0f;
     for (int i = 0; i < COMB_COUNT; ++i) {
-        outCombL += ProcessComb(&dsp->combL[i], inputMono, dsp->roomSize, dsp->damping);
-        outCombR += ProcessComb(&dsp->combR[i], inputMono, dsp->roomSize, dsp->damping);
+        combSumL += ProcessComb(&dsp->combL[i], pInL, dsp->roomSize, dsp->damping);
+        combSumR += ProcessComb(&dsp->combR[i], pInR, dsp->roomSize, dsp->damping);
     }
 
+    // 4. Series Allpass Filters
+    float revL = combSumL;
+    float revR = combSumR;
     for (int i = 0; i < ALLPASS_COUNT; ++i) {
-        outCombL = ProcessAllpass(&dsp->allpassL[i], outCombL);
-        outCombR = ProcessAllpass(&dsp->allpassR[i], outCombR);
+        revL = ProcessAllpass(&dsp->allpassL[i], revL);
+        revR = ProcessAllpass(&dsp->allpassR[i], revR);
     }
 
-    // 4. Complementary Dry/Wet Mixing with Soft Limiter
-    *outL = SoftClip((curL * dsp->dry) + (outCombL * dsp->wet));
-    *outR = SoftClip((curR * dsp->dry) + (outCombR * dsp->wet));
+    // 5. Cross-stereo diffusion & Wet/Dry mix with soft clipping
+    float wetL = (revL * 0.85f) + (revR * 0.15f);
+    float wetR = (revR * 0.85f) + (revL * 0.15f);
+
+    *outL = SoftClip((pInL * dsp->dry) + (wetL * dsp->wet));
+    *outR = SoftClip((pInR * dsp->dry) + (wetR * dsp->wet));
 }
 
-// ----------------------------------------------------------------------------
-// Buffer Interceptors (Float32 & SInt16 Formats)
-// ----------------------------------------------------------------------------
-static void ProcessAudioBufferList(ReverbDSP *dsp, UInt32 inNumberFrames, AudioBufferList *ioData) {
-    if (!dsp || !ioData || inNumberFrames == 0) return;
+static inline void ProcessAudioBufferList(ReverbDSP *dsp, UInt32 inNumberFrames, AudioBufferList *ioData) {
+    if (!dsp || !ioData || inNumberFrames == 0 || !dsp->enabled) return;
 
     if (ioData->mNumberBuffers >= 2) {
-        // Non-interleaved stereo
         float *bufL = (float *)ioData->mBuffers[0].mData;
         float *bufR = (float *)ioData->mBuffers[1].mData;
         if (!bufL || !bufR) return;
@@ -354,8 +340,8 @@ static void ProcessAudioBufferList(ReverbDSP *dsp, UInt32 inNumberFrames, AudioB
     }
 }
 
-static void ProcessRawAudioBytes(ReverbDSP *dsp, void *data, UInt32 numFrames, const AudioStreamBasicDescription *asbd) {
-    if (!dsp || !data || numFrames == 0 || !asbd) return;
+static inline void ProcessRawAudioBytes(ReverbDSP *dsp, void *data, UInt32 numFrames, const AudioStreamBasicDescription *asbd) {
+    if (!dsp || !data || numFrames == 0 || !asbd || !dsp->enabled) return;
 
     if (asbd->mFormatFlags & kAudioFormatFlagIsFloat) {
         if (asbd->mChannelsPerFrame >= 2) {
@@ -401,10 +387,476 @@ static void ProcessRawAudioBytes(ReverbDSP *dsp, void *data, UInt32 numFrames, c
 }
 
 // ============================================================================
-// HOOK 1: AudioUnitSetProperty & Render Callback Interception
+// Forward Function Pointer Declarations
+// ============================================================================
+static OSStatus (*real_AudioUnitSetProperty)(AudioUnit inUnit,
+                                             AudioUnitPropertyID inID,
+                                             AudioUnitScope inScope,
+                                             AudioUnitElement inElement,
+                                             const void *inData,
+                                             UInt32 inDataSize) = NULL;
+
+static OSStatus (*real_AudioUnitRender)(AudioUnit inUnit,
+                                        AudioUnitRenderActionFlags *ioActionFlags,
+                                        const AudioTimeStamp *inTimeStamp,
+                                        UInt32 inOutputBusNumber,
+                                        UInt32 inNumberFrames,
+                                        AudioBufferList *ioData) = NULL;
+
+static OSStatus (*real_AudioQueueStart)(AudioQueueRef inAQ, const AudioTimeStamp *inStartTime) = NULL;
+static OSStatus (*real_AudioQueueDispose)(AudioQueueRef inAQ, Boolean inImmediate) = NULL;
+
+static OSStatus (*real_AudioQueueEnqueueBuffer)(AudioQueueRef inAQ,
+                                                AudioQueueBufferRef inBuffer,
+                                                UInt32 inNumPacketDescs,
+                                                const AudioStreamPacketDescription *inPacketDescs) = NULL;
+
+static OSStatus (*real_AudioQueueEnqueueBufferWithParameters)(
+    AudioQueueRef inAQ,
+    AudioQueueBufferRef inBuffer,
+    UInt32 inNumPacketDescs,
+    const AudioStreamPacketDescription *inPacketDescs,
+    UInt32 inTrimFramesAtStart,
+    UInt32 inTrimFramesAtEnd,
+    UInt32 inNumParamValues,
+    const AudioQueueParameterEvent *inParamValues,
+    const AudioTimeStamp *inStartTime,
+    AudioTimeStamp *outActualStartTime
+) = NULL;
+
+static OSStatus (*real_AudioQueueProcessingTapNew)(
+    AudioQueueRef inAQ,
+    AudioQueueProcessingTapCallback inCallback,
+    void *inClientData,
+    AudioQueueProcessingTapFlags inFlags,
+    UInt32 *outMaxFrames,
+    AudioStreamBasicDescription *outProcessingFormat,
+    AudioQueueProcessingTapRef *outAQTap
+) = NULL;
+
+static OSStatus (*real_AudioQueueProcessingTapGetSourceAudio)(
+    AudioQueueProcessingTapRef inAQTap,
+    UInt32 inNumberFrames,
+    AudioTimeStamp *ioTimeStamp,
+    AudioQueueProcessingTapFlags *outFlags,
+    UInt32 *outNumberFrames,
+    AudioBufferList *ioData
+) = NULL;
+
+static OSStatus (*real_MTAudioProcessingTapGetSourceAudio)(
+    MTAudioProcessingTapRef tap,
+    CMItemCount numberFrames,
+    AudioBufferList *bufferListInOut,
+    MTAudioProcessingTapFlags *flagsOut,
+    CMTimeRange *timeRangeOut,
+    CMItemCount *numberFramesOut
+) = NULL;
+
+// ============================================================================
+// TIER 1: CoreAudio AudioQueue Processing Tap Engine (Decoded PCM Interception)
+// ============================================================================
+#define MAX_TRACKED_AQS 64
+
+typedef struct {
+    AudioQueueRef aq;
+    AudioQueueProcessingTapRef tap;
+    AudioQueueProcessingTapCallback origCallback;
+    void *origClientData;
+    AudioStreamBasicDescription format;
+    bool active;
+} TrackedAQ;
+
+static TrackedAQ g_trackedAQs[MAX_TRACKED_AQS];
+static pthread_mutex_t g_aqMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void MyAudioQueueProcessingTapCallback(
+    void *inClientData,
+    AudioQueueProcessingTapRef inAQTap,
+    UInt32 inNumberFrames,
+    AudioTimeStamp *ioTimeStamp,
+    AudioQueueProcessingTapFlags *ioFlags,
+    UInt32 *outNumberFrames,
+    AudioBufferList *ioData
+) {
+    if (!inAQTap || !ioData) return;
+
+    AudioQueueProcessingTapCallback origCb = NULL;
+    void *origClient = NULL;
+
+    pthread_mutex_lock(&g_aqMutex);
+    for (int i = 0; i < MAX_TRACKED_AQS; ++i) {
+        if (g_trackedAQs[i].active && g_trackedAQs[i].tap == inAQTap) {
+            origCb = g_trackedAQs[i].origCallback;
+            origClient = g_trackedAQs[i].origClientData;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_aqMutex);
+
+    if (origCb) {
+        origCb(origClient, inAQTap, inNumberFrames, ioTimeStamp, ioFlags, outNumberFrames, ioData);
+    } else {
+        if (real_AudioQueueProcessingTapGetSourceAudio) {
+            real_AudioQueueProcessingTapGetSourceAudio(inAQTap, inNumberFrames, ioTimeStamp, ioFlags, outNumberFrames, ioData);
+        } else {
+            AudioQueueProcessingTapGetSourceAudio(inAQTap, inNumberFrames, ioTimeStamp, ioFlags, outNumberFrames, ioData);
+        }
+    }
+
+    if (ioData != NULL && outNumberFrames != NULL && *outNumberFrames > 0 && g_dsp.enabled) {
+        static uint32_t s_tapFramesCount = 0;
+        if (s_tapFramesCount < 10) {
+            s_tapFramesCount++;
+            IGLog("[AQ Tap Callback] Rendered %u frames, bufs=%u, data0=%p",
+                  (unsigned int)*outNumberFrames, (unsigned int)ioData->mNumberBuffers,
+                  (ioData->mNumberBuffers > 0) ? ioData->mBuffers[0].mData : NULL);
+        }
+        ProcessAudioBufferList(&g_dsp, *outNumberFrames, ioData);
+    }
+}
+
+static void EnsureAudioQueueTapped(AudioQueueRef inAQ) {
+    if (!inAQ) return;
+
+    pthread_mutex_lock(&g_aqMutex);
+    for (int i = 0; i < MAX_TRACKED_AQS; ++i) {
+        if (g_trackedAQs[i].active && g_trackedAQs[i].aq == inAQ) {
+            pthread_mutex_unlock(&g_aqMutex);
+            return; // Already tapped
+        }
+    }
+    pthread_mutex_unlock(&g_aqMutex);
+
+    UInt32 maxFrames = 0;
+    AudioStreamBasicDescription processingFormat;
+    memset(&processingFormat, 0, sizeof(processingFormat));
+    AudioQueueProcessingTapRef tap = NULL;
+
+    OSStatus err = noErr;
+    if (real_AudioQueueProcessingTapNew) {
+        err = real_AudioQueueProcessingTapNew(
+            inAQ,
+            MyAudioQueueProcessingTapCallback,
+            (void *)inAQ,
+            kAudioQueueProcessingTap_PreEffects,
+            &maxFrames,
+            &processingFormat,
+            &tap
+        );
+    } else {
+        err = AudioQueueProcessingTapNew(
+            inAQ,
+            MyAudioQueueProcessingTapCallback,
+            (void *)inAQ,
+            kAudioQueueProcessingTap_PreEffects,
+            &maxFrames,
+            &processingFormat,
+            &tap
+        );
+    }
+
+    IGLog("[AudioQueue] AudioQueueProcessingTapNew on AQ=%p -> err=%d, tap=%p, maxFrames=%u, rate=%.1f, ch=%u",
+          inAQ, (int)err, tap, (unsigned int)maxFrames, processingFormat.mSampleRate, (unsigned int)processingFormat.mChannelsPerFrame);
+
+    if (err == noErr && tap != NULL) {
+        pthread_mutex_lock(&g_aqMutex);
+        for (int i = 0; i < MAX_TRACKED_AQS; ++i) {
+            if (!g_trackedAQs[i].active) {
+                g_trackedAQs[i].aq = inAQ;
+                g_trackedAQs[i].tap = tap;
+                g_trackedAQs[i].origCallback = NULL;
+                g_trackedAQs[i].origClientData = NULL;
+                g_trackedAQs[i].format = processingFormat;
+                g_trackedAQs[i].active = true;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_aqMutex);
+    }
+}
+
+static OSStatus MyAudioQueueStart(AudioQueueRef inAQ, const AudioTimeStamp *inStartTime) {
+    static uint32_t s_aqStartCount = 0;
+    if (s_aqStartCount < 20) {
+        s_aqStartCount++;
+        IGLog("[Hook] AudioQueueStart [#%u]: AQ=%p", s_aqStartCount, inAQ);
+    }
+
+    if (inAQ) {
+        EnsureAudioQueueTapped(inAQ);
+    }
+
+    if (real_AudioQueueStart) {
+        return real_AudioQueueStart(inAQ, inStartTime);
+    }
+    return AudioQueueStart(inAQ, inStartTime);
+}
+
+static OSStatus MyAudioQueueDispose(AudioQueueRef inAQ, Boolean inImmediate) {
+    if (inAQ) {
+        pthread_mutex_lock(&g_aqMutex);
+        for (int i = 0; i < MAX_TRACKED_AQS; ++i) {
+            if (g_trackedAQs[i].active && g_trackedAQs[i].aq == inAQ) {
+                if (g_trackedAQs[i].tap) {
+                    AudioQueueProcessingTapDispose(g_trackedAQs[i].tap);
+                }
+                memset(&g_trackedAQs[i], 0, sizeof(TrackedAQ));
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_aqMutex);
+    }
+
+    if (real_AudioQueueDispose) {
+        return real_AudioQueueDispose(inAQ, inImmediate);
+    }
+    return AudioQueueDispose(inAQ, inImmediate);
+}
+
+static OSStatus MyAudioQueueProcessingTapNew(
+    AudioQueueRef inAQ,
+    AudioQueueProcessingTapCallback inCallback,
+    void *inClientData,
+    AudioQueueProcessingTapFlags inFlags,
+    UInt32 *outMaxFrames,
+    AudioStreamBasicDescription *outProcessingFormat,
+    AudioQueueProcessingTapRef *outAQTap
+) {
+    IGLog("[Hook] AudioQueueProcessingTapNew called by app for AQ=%p, origCb=%p", inAQ, inCallback);
+
+    AudioQueueProcessingTapRef tap = NULL;
+    OSStatus err = noErr;
+
+    if (real_AudioQueueProcessingTapNew) {
+        err = real_AudioQueueProcessingTapNew(
+            inAQ,
+            MyAudioQueueProcessingTapCallback,
+            (void *)inAQ,
+            inFlags,
+            outMaxFrames,
+            outProcessingFormat,
+            &tap
+        );
+    } else {
+        err = AudioQueueProcessingTapNew(
+            inAQ,
+            MyAudioQueueProcessingTapCallback,
+            (void *)inAQ,
+            inFlags,
+            outMaxFrames,
+            outProcessingFormat,
+            &tap
+        );
+    }
+
+    if (err == noErr && tap != NULL) {
+        if (outAQTap) *outAQTap = tap;
+
+        pthread_mutex_lock(&g_aqMutex);
+        int targetIdx = -1;
+        for (int i = 0; i < MAX_TRACKED_AQS; ++i) {
+            if (g_trackedAQs[i].active && g_trackedAQs[i].aq == inAQ) {
+                targetIdx = i;
+                break;
+            }
+        }
+        if (targetIdx == -1) {
+            for (int i = 0; i < MAX_TRACKED_AQS; ++i) {
+                if (!g_trackedAQs[i].active) {
+                    targetIdx = i;
+                    break;
+                }
+            }
+        }
+        if (targetIdx >= 0) {
+            g_trackedAQs[targetIdx].aq = inAQ;
+            g_trackedAQs[targetIdx].tap = tap;
+            g_trackedAQs[targetIdx].origCallback = inCallback;
+            g_trackedAQs[targetIdx].origClientData = inClientData;
+            if (outProcessingFormat) g_trackedAQs[targetIdx].format = *outProcessingFormat;
+            g_trackedAQs[targetIdx].active = true;
+        }
+        pthread_mutex_unlock(&g_aqMutex);
+    }
+    return err;
+}
+
+static OSStatus MyAudioQueueProcessingTapGetSourceAudio(
+    AudioQueueProcessingTapRef inAQTap,
+    UInt32 inNumberFrames,
+    AudioTimeStamp *ioTimeStamp,
+    AudioQueueProcessingTapFlags *outFlags,
+    UInt32 *outNumberFrames,
+    AudioBufferList *ioData
+) {
+    OSStatus status = noErr;
+    if (real_AudioQueueProcessingTapGetSourceAudio) {
+        status = real_AudioQueueProcessingTapGetSourceAudio(inAQTap, inNumberFrames, ioTimeStamp, outFlags, outNumberFrames, ioData);
+    } else {
+        status = AudioQueueProcessingTapGetSourceAudio(inAQTap, inNumberFrames, ioTimeStamp, outFlags, outNumberFrames, ioData);
+    }
+
+    if (status == noErr && ioData != NULL && outNumberFrames != NULL && *outNumberFrames > 0 && g_dsp.enabled) {
+        ProcessAudioBufferList(&g_dsp, *outNumberFrames, ioData);
+    }
+    return status;
+}
+
+// ============================================================================
+// TIER 2: Meta FNFCoreAudioWrapper Objective-C Method Swizzle
+// ============================================================================
+static void (*orig_FNF_tapCallback)(id, SEL, AudioQueueProcessingTapRef, UInt32, AudioBufferList *, UInt32) = NULL;
+
+static void swizzled_FNF_tapCallback(id self, SEL _cmd, AudioQueueProcessingTapRef tap, UInt32 sourceFlags, AudioBufferList *ioData, UInt32 numFrames) {
+    if (orig_FNF_tapCallback) {
+        orig_FNF_tapCallback(self, _cmd, tap, sourceFlags, ioData, numFrames);
+    }
+    if (g_dsp.enabled && ioData != NULL && numFrames > 0) {
+        ProcessAudioBufferList(&g_dsp, numFrames, ioData);
+    }
+}
+
+static void InitFNFObjCSwizzling(void) {
+    Class clsFNF = objc_getClass("FNFCoreAudioWrapper");
+    if (clsFNF) {
+        SEL selTap = sel_registerName("audioQueueConverterProcessingTapCallback:sourceFlags:ioData:numFrames:");
+        Method m = class_getInstanceMethod(clsFNF, selTap);
+        if (m) {
+            orig_FNF_tapCallback = (void (*)(id, SEL, AudioQueueProcessingTapRef, UInt32, AudioBufferList *, UInt32))method_getImplementation(m);
+            method_setImplementation(m, (IMP)swizzled_FNF_tapCallback);
+            IGLog("[Swizzle] Hooked FNFCoreAudioWrapper audioQueueConverterProcessingTapCallback!");
+        }
+    }
+}
+
+// ============================================================================
+// TIER 3: MediaToolbox MTAudioProcessingTap (AVPlayer Video Track Interception)
+// ============================================================================
+static void MyMTAudioProcessingTapProcessCallback(
+    MTAudioProcessingTapRef tap,
+    CMItemCount numberFrames,
+    MTAudioProcessingTapFlags flags,
+    AudioBufferList *bufferListInOut,
+    CMItemCount *numberFramesOut,
+    MTAudioProcessingTapFlags *flagsOut
+) {
+    OSStatus err = noErr;
+    if (real_MTAudioProcessingTapGetSourceAudio) {
+        err = real_MTAudioProcessingTapGetSourceAudio(tap, numberFrames, bufferListInOut, flagsOut, NULL, numberFramesOut);
+    } else {
+        err = MTAudioProcessingTapGetSourceAudio(tap, numberFrames, bufferListInOut, flagsOut, NULL, numberFramesOut);
+    }
+
+    if (err == noErr && bufferListInOut != NULL && g_dsp.enabled) {
+        CMItemCount frames = (numberFramesOut != NULL) ? *numberFramesOut : numberFrames;
+        if (frames > 0 && bufferListInOut->mNumberBuffers > 0 && bufferListInOut->mBuffers[0].mData != NULL) {
+            ProcessAudioBufferList(&g_dsp, (UInt32)frames, bufferListInOut);
+        }
+    }
+}
+
+static void AttachAudioMixToPlayerItem(AVPlayerItem *item) {
+    if (!item || item.audioMix) return;
+
+    AVAsset *asset = item.asset;
+    if (!asset) return;
+
+    NSArray<AVAssetTrack *> *tracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+    if (tracks.count == 0) return;
+
+    MTAudioProcessingTapCallbacks callbacks;
+    memset(&callbacks, 0, sizeof(callbacks));
+    callbacks.version = 0;
+    callbacks.process = MyMTAudioProcessingTapProcessCallback;
+
+    MTAudioProcessingTapRef tap = NULL;
+    OSStatus err = MTAudioProcessingTapCreate(kCFAllocatorDefault, &callbacks, kMTAudioProcessingTapCreationFlag_PreEffects, &tap);
+    if (err == noErr && tap != NULL) {
+        NSMutableArray *inputParams = [NSMutableArray array];
+        for (AVAssetTrack *track in tracks) {
+            AVMutableAudioMixInputParameters *params = [AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:track];
+            params.audioTapProcessor = tap;
+            [inputParams addObject:params];
+        }
+        AVMutableAudioMix *audioMix = [AVMutableAudioMix audioMix];
+        audioMix.inputParameters = inputParams;
+        item.audioMix = audioMix;
+        CFRelease(tap);
+        IGLog("[AVPlayerItem] Successfully attached MTAudioProcessingTap audioMix to %p", item);
+    }
+}
+
+static id (*orig_AVPlayerItem_initWithAsset)(id, SEL, AVAsset *, NSArray *) = NULL;
+static id swizzled_AVPlayerItem_initWithAsset(id self, SEL _cmd, AVAsset *asset, NSArray *keys) {
+    id item = orig_AVPlayerItem_initWithAsset(self, _cmd, asset, keys);
+    if (item) {
+        AttachAudioMixToPlayerItem(item);
+    }
+    return item;
+}
+
+static id (*orig_AVPlayerItem_initWithURL)(id, SEL, NSURL *) = NULL;
+static id swizzled_AVPlayerItem_initWithURL(id self, SEL _cmd, NSURL *URL) {
+    id item = orig_AVPlayerItem_initWithURL(self, _cmd, URL);
+    if (item) {
+        AttachAudioMixToPlayerItem(item);
+    }
+    return item;
+}
+
+static void InitAVPlayerItemSwizzling(void) {
+    Class clsItem = objc_getClass("AVPlayerItem");
+    if (clsItem) {
+        SEL selAsset = @selector(initWithAsset:automaticallyLoadedAssetKeys:);
+        Method mAsset = class_getInstanceMethod(clsItem, selAsset);
+        if (mAsset) {
+            orig_AVPlayerItem_initWithAsset = (id (*)(id, SEL, AVAsset *, NSArray *))method_getImplementation(mAsset);
+            method_setImplementation(mAsset, (IMP)swizzled_AVPlayerItem_initWithAsset);
+            IGLog("[Swizzle] Hooked AVPlayerItem initWithAsset:automaticallyLoadedAssetKeys:!");
+        }
+
+        SEL selURL = @selector(initWithURL:);
+        Method mURL = class_getInstanceMethod(clsItem, selURL);
+        if (mURL) {
+            orig_AVPlayerItem_initWithURL = (id (*)(id, SEL, NSURL *))method_getImplementation(mURL);
+            method_setImplementation(mURL, (IMP)swizzled_AVPlayerItem_initWithURL);
+            IGLog("[Swizzle] Hooked AVPlayerItem initWithURL:!");
+        }
+    }
+}
+
+static OSStatus MyMTAudioProcessingTapGetSourceAudio(
+    MTAudioProcessingTapRef tap,
+    CMItemCount numberFrames,
+    AudioBufferList *bufferListInOut,
+    MTAudioProcessingTapFlags *flagsOut,
+    CMTimeRange *timeRangeOut,
+    CMItemCount *numberFramesOut
+) {
+    OSStatus status = noErr;
+    if (real_MTAudioProcessingTapGetSourceAudio) {
+        status = real_MTAudioProcessingTapGetSourceAudio(
+            tap, numberFrames, bufferListInOut, flagsOut, timeRangeOut, numberFramesOut
+        );
+    } else {
+        status = MTAudioProcessingTapGetSourceAudio(
+            tap, numberFrames, bufferListInOut, flagsOut, timeRangeOut, numberFramesOut
+        );
+    }
+
+    if (status == noErr && bufferListInOut != NULL && g_dsp.enabled) {
+        UInt32 frames = (numberFramesOut != NULL) ? (UInt32)*numberFramesOut : (UInt32)numberFrames;
+        if (frames > 0 && bufferListInOut->mNumberBuffers > 0 && bufferListInOut->mBuffers[0].mData != NULL) {
+            ProcessAudioBufferList(&g_dsp, frames, bufferListInOut);
+        }
+    }
+    return status;
+}
+
+// ============================================================================
+// TIER 4: CoreAudio AudioUnit Render & SetProperty Interception
 // ============================================================================
 #define MAX_WRAPPERS 32
-
 typedef struct {
     AURenderCallback origProc;
     void *origRefCon;
@@ -413,13 +865,6 @@ typedef struct {
 static RenderCallbackWrapper sWrappers[MAX_WRAPPERS];
 static int sWrapperCount = 0;
 static pthread_mutex_t sWrapperLock = PTHREAD_MUTEX_INITIALIZER;
-
-static OSStatus (*real_AudioUnitSetProperty)(AudioUnit inUnit,
-                                             AudioUnitPropertyID inID,
-                                             AudioUnitScope inScope,
-                                             AudioUnitElement inElement,
-                                             const void *inData,
-                                             UInt32 inDataSize) = NULL;
 
 static OSStatus WrappedRenderCallback(void *inRefCon,
                                       AudioUnitRenderActionFlags *ioActionFlags,
@@ -432,7 +877,7 @@ static OSStatus WrappedRenderCallback(void *inRefCon,
     if (w && w->origProc) {
         status = w->origProc(w->origRefCon, ioActionFlags, inTimeStamp, inBusNumber, inNumberFrames, ioData);
     }
-    if (status == noErr && ioData != NULL && g_dsp.enabled) {
+    if (status == noErr && ioData != NULL && inNumberFrames > 0 && g_dsp.enabled) {
         ProcessAudioBufferList(&g_dsp, inNumberFrames, ioData);
     }
     return status;
@@ -480,31 +925,12 @@ static OSStatus MyAudioUnitSetProperty(AudioUnit inUnit,
     return AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
 }
 
-// ============================================================================
-// HOOK 2: AudioUnitRender (CoreAudio Render Interception)
-// ============================================================================
-static OSStatus (*real_AudioUnitRender)(AudioUnit inUnit,
-                                        AudioUnitRenderActionFlags *ioActionFlags,
-                                        const AudioTimeStamp *inTimeStamp,
-                                        UInt32 inOutputBusNumber,
-                                        UInt32 inNumberFrames,
-                                        AudioBufferList *ioData) = NULL;
-
 static OSStatus MyAudioUnitRender(AudioUnit inUnit,
                                   AudioUnitRenderActionFlags *ioActionFlags,
                                   const AudioTimeStamp *inTimeStamp,
                                   UInt32 inOutputBusNumber,
                                   UInt32 inNumberFrames,
                                   AudioBufferList *ioData) {
-    static uint32_t s_auRenderCount = 0;
-    if (s_auRenderCount < 20) {
-        s_auRenderCount++;
-        IGLog("[Hook] AudioUnitRender [#%u]: unit=%p frames=%u bufs=%u data0=%p",
-              s_auRenderCount, inUnit, (unsigned int)inNumberFrames,
-              (unsigned int)(ioData ? ioData->mNumberBuffers : 0),
-              (ioData && ioData->mNumberBuffers > 0) ? ioData->mBuffers[0].mData : NULL);
-    }
-
     OSStatus status = noErr;
     if (real_AudioUnitRender) {
         status = real_AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
@@ -519,21 +945,8 @@ static OSStatus MyAudioUnitRender(AudioUnit inUnit,
 }
 
 // ============================================================================
-// HOOK 3: AudioQueue Enqueue Buffer with Parameters (Meta FNFPlayer Interception)
+// TIER 5: CoreAudio AudioQueue Enqueue Buffer Interception (Direct PCM Streams)
 // ============================================================================
-static OSStatus (*real_AudioQueueEnqueueBufferWithParameters)(
-    AudioQueueRef inAQ,
-    AudioQueueBufferRef inBuffer,
-    UInt32 inNumPacketDescs,
-    const AudioStreamPacketDescription *inPacketDescs,
-    UInt32 inTrimFramesAtStart,
-    UInt32 inTrimFramesAtEnd,
-    UInt32 inNumParamValues,
-    const AudioQueueParameterEvent *inParamValues,
-    const AudioTimeStamp *inStartTime,
-    AudioTimeStamp *outActualStartTime
-) = NULL;
-
 static OSStatus MyAudioQueueEnqueueBufferWithParameters(
     AudioQueueRef inAQ,
     AudioQueueBufferRef inBuffer,
@@ -546,22 +959,8 @@ static OSStatus MyAudioQueueEnqueueBufferWithParameters(
     const AudioTimeStamp *inStartTime,
     AudioTimeStamp *outActualStartTime
 ) {
-    static uint32_t s_aqParamsCount = 0;
-    if (s_aqParamsCount < 20) {
-        s_aqParamsCount++;
-        AudioStreamBasicDescription asbd;
-        memset(&asbd, 0, sizeof(asbd));
-        UInt32 propSize = sizeof(asbd);
-        AudioQueueGetProperty(inAQ, kAudioQueueProperty_StreamDescription, &asbd, &propSize);
-        char fourcc[5] = {0};
-        uint32_t beFormat = CFSwapInt32HostToBig(asbd.mFormatID);
-        memcpy(fourcc, &beFormat, 4);
-        IGLog("[Hook] AQEnqueueParams [#%u]: AQ=%p bytes=%u pkts=%u format='%s'(0x%08x) rate=%.1f ch=%u bits=%u",
-              s_aqParamsCount, inAQ,
-              inBuffer ? (unsigned int)inBuffer->mAudioDataByteSize : 0,
-              (unsigned int)inNumPacketDescs,
-              fourcc, (unsigned int)asbd.mFormatID, asbd.mSampleRate,
-              (unsigned int)asbd.mChannelsPerFrame, (unsigned int)asbd.mBitsPerChannel);
+    if (inAQ) {
+        EnsureAudioQueueTapped(inAQ);
     }
 
     if (g_dsp.enabled && inBuffer && inBuffer->mAudioData && inBuffer->mAudioDataByteSize > 0 && inNumPacketDescs == 0) {
@@ -588,33 +987,12 @@ static OSStatus MyAudioQueueEnqueueBufferWithParameters(
     );
 }
 
-// ============================================================================
-// HOOK 4: AudioQueue Standard Enqueue Buffer (Direct PCM Streams)
-// ============================================================================
-static OSStatus (*real_AudioQueueEnqueueBuffer)(AudioQueueRef inAQ,
-                                                AudioQueueBufferRef inBuffer,
-                                                UInt32 inNumPacketDescs,
-                                                const AudioStreamPacketDescription *inPacketDescs) = NULL;
-
 static OSStatus MyAudioQueueEnqueueBuffer(AudioQueueRef inAQ,
                                           AudioQueueBufferRef inBuffer,
                                           UInt32 inNumPacketDescs,
                                           const AudioStreamPacketDescription *inPacketDescs) {
-    static uint32_t s_aqStdCount = 0;
-    if (s_aqStdCount < 20) {
-        s_aqStdCount++;
-        AudioStreamBasicDescription asbd;
-        memset(&asbd, 0, sizeof(asbd));
-        UInt32 propSize = sizeof(asbd);
-        AudioQueueGetProperty(inAQ, kAudioQueueProperty_StreamDescription, &asbd, &propSize);
-        char fourcc[5] = {0};
-        uint32_t beFormat = CFSwapInt32HostToBig(asbd.mFormatID);
-        memcpy(fourcc, &beFormat, 4);
-        IGLog("[Hook] AQEnqueueStd [#%u]: AQ=%p bytes=%u pkts=%u format='%s'(0x%08x) rate=%.1f ch=%u",
-              s_aqStdCount, inAQ,
-              inBuffer ? (unsigned int)inBuffer->mAudioDataByteSize : 0,
-              (unsigned int)inNumPacketDescs,
-              fourcc, (unsigned int)asbd.mFormatID, asbd.mSampleRate, (unsigned int)asbd.mChannelsPerFrame);
+    if (inAQ) {
+        EnsureAudioQueueTapped(inAQ);
     }
 
     if (g_dsp.enabled && inBuffer && inBuffer->mAudioData && inBuffer->mAudioDataByteSize > 0 && inNumPacketDescs == 0) {
@@ -634,54 +1012,150 @@ static OSStatus MyAudioQueueEnqueueBuffer(AudioQueueRef inAQ,
 }
 
 // ============================================================================
-// HOOK 5: MediaToolbox MTAudioProcessingTap (AVPlayer Video Track Interception)
+// DUAL REBINDING TECHNOLOGY
+// Method A: Direct GOT Scanner (Overcomes LC_DYLD_CHAINED_FIXUPS in FBSharedFramework)
+// Method B: CydiaSubstrate MSHookFunction Dynamic Linking
 // ============================================================================
-static OSStatus (*real_MTAudioProcessingTapGetSourceAudio)(
-    MTAudioProcessingTapRef tap,
-    CMItemCount numberFrames,
-    AudioBufferList *bufferListInOut,
-    MTAudioProcessingTapFlags *flagsOut,
-    CMTimeRange *timeRangeOut,
-    CMItemCount *numberFramesOut
-) = NULL;
+typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
+static MSHookFunction_t g_MSHookFunction = NULL;
 
-static OSStatus MyMTAudioProcessingTapGetSourceAudio(
-    MTAudioProcessingTapRef tap,
-    CMItemCount numberFrames,
-    AudioBufferList *bufferListInOut,
-    MTAudioProcessingTapFlags *flagsOut,
-    CMTimeRange *timeRangeOut,
-    CMItemCount *numberFramesOut
-) {
-    static uint32_t s_mtTapCount = 0;
-    if (s_mtTapCount < 20) {
-        s_mtTapCount++;
-        IGLog("[Hook] MTTapGetSourceAudio [#%u]: tap=%p frames=%lu bufs=%u data0=%p",
-              s_mtTapCount, tap, (unsigned long)numberFrames,
-              (unsigned int)(bufferListInOut ? bufferListInOut->mNumberBuffers : 0),
-              (bufferListInOut && bufferListInOut->mNumberBuffers > 0) ? bufferListInOut->mBuffers[0].mData : NULL);
-    }
+static void PatchGOTPointersInAllImages(void *target_func, void *replacement_func, const char *symbol_name) {
+    if (!target_func || !replacement_func) return;
 
-    OSStatus status = noErr;
-    if (real_MTAudioProcessingTapGetSourceAudio) {
-        status = real_MTAudioProcessingTapGetSourceAudio(
-            tap, numberFrames, bufferListInOut, flagsOut, timeRangeOut, numberFramesOut
-        );
-    } else {
-        status = MTAudioProcessingTapGetSourceAudio(
-            tap, numberFrames, bufferListInOut, flagsOut, timeRangeOut, numberFramesOut
-        );
-    }
+    uintptr_t target_addr = (uintptr_t)target_func & 0x0000007fffffffffULL;
+    uintptr_t repl_addr = (uintptr_t)replacement_func;
 
-    if (status == noErr && bufferListInOut != NULL && g_dsp.enabled) {
-        UInt32 frames = (numberFramesOut != NULL) ? (UInt32)*numberFramesOut : (UInt32)numberFrames;
-        if (frames > 0 && bufferListInOut->mNumberBuffers > 0 && bufferListInOut->mBuffers[0].mData != NULL) {
-            ProcessAudioBufferList(&g_dsp, frames, bufferListInOut);
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const struct mach_header *header = _dyld_get_image_header(i);
+        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+        const char *image_name = _dyld_get_image_name(i);
+        if (!header || !image_name) continue;
+
+        // Target Instagram, FBSharedFramework, and local app frameworks
+        if (!strstr(image_name, "Instagram.app") &&
+            !strstr(image_name, "FBSharedFramework") &&
+            !strstr(image_name, "Instagram")) {
+            continue;
+        }
+
+        uintptr_t cur = (uintptr_t)header;
+        #ifdef __LP64__
+        cur += sizeof(struct mach_header_64);
+        #else
+        cur += sizeof(struct mach_header);
+        #endif
+
+        for (uint32_t c = 0; c < header->ncmds; c++) {
+            struct segment_command_64 *seg = (struct segment_command_64 *)cur;
+            if (seg->cmd == LC_SEGMENT_64) {
+                const char *segname = seg->segname;
+                if (strcmp(segname, "__DATA_CONST") == 0 ||
+                    strcmp(segname, "__DATA") == 0 ||
+                    strcmp(segname, "__AUTH_CONST") == 0) {
+
+                    struct section_64 *sect = (struct section_64 *)((uintptr_t)seg + sizeof(struct segment_command_64));
+                    for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+                        const char *sectname = sect->sectname;
+                        if (strcmp(sectname, "__got") == 0 ||
+                            strcmp(sectname, "__auth_got") == 0 ||
+                            strcmp(sectname, "__nl_symbol_ptr") == 0 ||
+                            strcmp(sectname, "__la_symbol_ptr") == 0) {
+
+                            uintptr_t sect_addr = (uintptr_t)slide + sect->addr;
+                            size_t sect_size = (size_t)sect->size;
+                            uintptr_t *slots = (uintptr_t *)sect_addr;
+                            size_t num_slots = sect_size / sizeof(uintptr_t);
+
+                            for (size_t k = 0; k < num_slots; k++) {
+                                uintptr_t val = slots[k] & 0x0000007fffffffffULL;
+                                if (val == target_addr) {
+                                    vm_address_t page = (vm_address_t)&slots[k];
+                                    kern_return_t kr = vm_protect(mach_task_self(), page, sizeof(uintptr_t), false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+                                    if (kr == KERN_SUCCESS) {
+                                        slots[k] = repl_addr;
+                                        IGLog("[GOT Scanner] Patched %s in %s at %p", symbol_name, sectname, &slots[k]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            cur += seg->cmdsize;
         }
     }
-    return status;
 }
 
+static void InstallAllInterceptionHooks(void) {
+    // 1. Resolve CydiaSubstrate MSHookFunction if present
+    g_MSHookFunction = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
+    if (!g_MSHookFunction) {
+        void *h = dlopen("@rpath/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW | RTLD_GLOBAL);
+        if (!h) {
+            h = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW | RTLD_GLOBAL);
+        }
+        if (h) {
+            g_MSHookFunction = (MSHookFunction_t)dlsym(h, "MSHookFunction");
+        }
+    }
+
+    if (g_MSHookFunction) {
+        IGLog("[Substrate] MSHookFunction available! Intercepting via inline prologue hooks...");
+        g_MSHookFunction((void *)AudioQueueStart, (void *)MyAudioQueueStart, (void **)&real_AudioQueueStart);
+        g_MSHookFunction((void *)AudioQueueDispose, (void *)MyAudioQueueDispose, (void **)&real_AudioQueueDispose);
+        g_MSHookFunction((void *)AudioQueueProcessingTapNew, (void *)MyAudioQueueProcessingTapNew, (void **)&real_AudioQueueProcessingTapNew);
+        g_MSHookFunction((void *)AudioQueueProcessingTapGetSourceAudio, (void *)MyAudioQueueProcessingTapGetSourceAudio, (void **)&real_AudioQueueProcessingTapGetSourceAudio);
+        g_MSHookFunction((void *)AudioUnitRender, (void *)MyAudioUnitRender, (void **)&real_AudioUnitRender);
+        g_MSHookFunction((void *)AudioUnitSetProperty, (void *)MyAudioUnitSetProperty, (void **)&real_AudioUnitSetProperty);
+        g_MSHookFunction((void *)AudioQueueEnqueueBuffer, (void *)MyAudioQueueEnqueueBuffer, (void **)&real_AudioQueueEnqueueBuffer);
+        g_MSHookFunction((void *)AudioQueueEnqueueBufferWithParameters, (void *)MyAudioQueueEnqueueBufferWithParameters, (void **)&real_AudioQueueEnqueueBufferWithParameters);
+        g_MSHookFunction((void *)MTAudioProcessingTapGetSourceAudio, (void *)MyMTAudioProcessingTapGetSourceAudio, (void **)&real_MTAudioProcessingTapGetSourceAudio);
+    }
+
+    // 2. Direct GOT Scanner (Crucial for FBSharedFramework chained fixups)
+    IGLog("[GOT Scanner] Scanning GOT entries across all loaded images...");
+    PatchGOTPointersInAllImages((void *)AudioQueueStart, (void *)MyAudioQueueStart, "AudioQueueStart");
+    PatchGOTPointersInAllImages((void *)AudioQueueDispose, (void *)MyAudioQueueDispose, "AudioQueueDispose");
+    PatchGOTPointersInAllImages((void *)AudioQueueProcessingTapNew, (void *)MyAudioQueueProcessingTapNew, "AudioQueueProcessingTapNew");
+    PatchGOTPointersInAllImages((void *)AudioQueueProcessingTapGetSourceAudio, (void *)MyAudioQueueProcessingTapGetSourceAudio, "AudioQueueProcessingTapGetSourceAudio");
+    PatchGOTPointersInAllImages((void *)AudioUnitRender, (void *)MyAudioUnitRender, "AudioUnitRender");
+    PatchGOTPointersInAllImages((void *)AudioUnitSetProperty, (void *)MyAudioUnitSetProperty, "AudioUnitSetProperty");
+    PatchGOTPointersInAllImages((void *)AudioQueueEnqueueBuffer, (void *)MyAudioQueueEnqueueBuffer, "AudioQueueEnqueueBuffer");
+    PatchGOTPointersInAllImages((void *)AudioQueueEnqueueBufferWithParameters, (void *)MyAudioQueueEnqueueBufferWithParameters, "AudioQueueEnqueueBufferWithParameters");
+    PatchGOTPointersInAllImages((void *)MTAudioProcessingTapGetSourceAudio, (void *)MyMTAudioProcessingTapGetSourceAudio, "MTAudioProcessingTapGetSourceAudio");
+
+    // 3. Classic fishhook for images with traditional indirect symbol tables
+    struct rebinding rebindings[] = {
+        {"AudioQueueStart", (void *)MyAudioQueueStart, (void **)&real_AudioQueueStart},
+        {"AudioQueueDispose", (void *)MyAudioQueueDispose, (void **)&real_AudioQueueDispose},
+        {"AudioQueueProcessingTapNew", (void *)MyAudioQueueProcessingTapNew, (void **)&real_AudioQueueProcessingTapNew},
+        {"AudioQueueProcessingTapGetSourceAudio", (void *)MyAudioQueueProcessingTapGetSourceAudio, (void **)&real_AudioQueueProcessingTapGetSourceAudio},
+        {"AudioUnitRender", (void *)MyAudioUnitRender, (void **)&real_AudioUnitRender},
+        {"AudioUnitSetProperty", (void *)MyAudioUnitSetProperty, (void **)&real_AudioUnitSetProperty},
+        {"AudioQueueEnqueueBuffer", (void *)MyAudioQueueEnqueueBuffer, (void **)&real_AudioQueueEnqueueBuffer},
+        {"AudioQueueEnqueueBufferWithParameters", (void *)MyAudioQueueEnqueueBufferWithParameters, (void **)&real_AudioQueueEnqueueBufferWithParameters},
+        {"MTAudioProcessingTapGetSourceAudio", (void *)MyMTAudioProcessingTapGetSourceAudio, (void **)&real_MTAudioProcessingTapGetSourceAudio}
+    };
+    int ret = rebind_symbols(rebindings, sizeof(rebindings) / sizeof(rebindings[0]));
+    IGLog("[fishhook] rebind_symbols returned %d", ret);
+
+    // 4. Objective-C Swizzling on FNFCoreAudioWrapper and AVPlayerItem
+    InitFNFObjCSwizzling();
+    InitAVPlayerItemSwizzling();
+}
+
+static void OnImageAdded(const struct mach_header *header, intptr_t slide) {
+    PatchGOTPointersInAllImages((void *)AudioQueueStart, (void *)MyAudioQueueStart, "AudioQueueStart");
+    PatchGOTPointersInAllImages((void *)AudioQueueDispose, (void *)MyAudioQueueDispose, "AudioQueueDispose");
+    PatchGOTPointersInAllImages((void *)AudioQueueProcessingTapNew, (void *)MyAudioQueueProcessingTapNew, "AudioQueueProcessingTapNew");
+    PatchGOTPointersInAllImages((void *)AudioQueueProcessingTapGetSourceAudio, (void *)MyAudioQueueProcessingTapGetSourceAudio, "AudioQueueProcessingTapGetSourceAudio");
+    PatchGOTPointersInAllImages((void *)AudioUnitRender, (void *)MyAudioUnitRender, "AudioUnitRender");
+    PatchGOTPointersInAllImages((void *)AudioUnitSetProperty, (void *)MyAudioUnitSetProperty, "AudioUnitSetProperty");
+    PatchGOTPointersInAllImages((void *)AudioQueueEnqueueBuffer, (void *)MyAudioQueueEnqueueBuffer, "AudioQueueEnqueueBuffer");
+    PatchGOTPointersInAllImages((void *)AudioQueueEnqueueBufferWithParameters, (void *)MyAudioQueueEnqueueBufferWithParameters, "AudioQueueEnqueueBufferWithParameters");
+    PatchGOTPointersInAllImages((void *)MTAudioProcessingTapGetSourceAudio, (void *)MyMTAudioProcessingTapGetSourceAudio, "MTAudioProcessingTapGetSourceAudio");
+}
 
 // ============================================================================
 // Public C API Implementation
@@ -742,7 +1216,7 @@ float InstagramReverb_GetRoomSize(void) {
 void InstagramReverb_ResetDefaults(void) {
     InstagramReverb_SetPitch(0.0f);
     InstagramReverb_SetRoomSize(0.82f);
-    InstagramReverb_SetWetDry(0.35f, 0.65f); // 65% dry / 35% wet (sum = 100%)
+    InstagramReverb_SetWetDry(0.35f, 0.65f);
     InstagramReverb_SetEnabled(true);
 }
 
@@ -776,15 +1250,15 @@ static void InstagramReverbInit(void) {
     }
 
     IGLog("==================================================================");
-    IGLog("InstagramReverb Engine Initializing... PID: %d, App: %s",
+    IGLog("InstagramReverb Multi-Tier Engine Initializing... PID: %d, App: %s",
           getpid(), [[[NSBundle mainBundle] bundleIdentifier] UTF8String] ?: "Unknown");
     IGLog("Log file: %s", g_logFilePath[0] ? g_logFilePath : "Failed to resolve Documents dir");
     IGLog("Crash log file: %s", g_crashFilePath[0] ? g_crashFilePath : "Failed to resolve Documents dir");
 
+    // 3. Initialize DSP state
     memset(&g_dsp, 0, sizeof(ReverbDSP));
     pthread_mutex_init(&g_dsp.lock, NULL);
 
-    // Initialize delay networks
     for (int i = 0; i < COMB_COUNT; ++i) {
         g_dsp.combL[i].bufSize = kCombLengthsL[i];
         g_dsp.combR[i].bufSize = kCombLengthsR[i];
@@ -795,7 +1269,7 @@ static void InstagramReverbInit(void) {
     }
 
     g_dsp.roomSize = 0.82f;
-    g_dsp.damping = 0.25f; // Fixed internal damping constant
+    g_dsp.damping = 0.25f;
     g_dsp.wet = 0.35f;
     g_dsp.dry = 0.65f;
     g_dsp.targetRoomSize = 0.82f;
@@ -809,19 +1283,12 @@ static void InstagramReverbInit(void) {
     g_dsp.pitchWriteIdx = 0;
     g_dsp.enabled = true;
 
-    // Runtime symbol rebinding with fishhook for AudioUnit, AudioQueue, and MediaToolbox
-    // fishhook atomically populates real_* with the true underlying system function pointers.
-    struct rebinding rebindings[] = {
-        {"AudioUnitRender", (void *)MyAudioUnitRender, (void **)&real_AudioUnitRender},
-        {"AudioUnitSetProperty", (void *)MyAudioUnitSetProperty, (void **)&real_AudioUnitSetProperty},
-        {"AudioQueueEnqueueBuffer", (void *)MyAudioQueueEnqueueBuffer, (void **)&real_AudioQueueEnqueueBuffer},
-        {"AudioQueueEnqueueBufferWithParameters", (void *)MyAudioQueueEnqueueBufferWithParameters, (void **)&real_AudioQueueEnqueueBufferWithParameters},
-        {"MTAudioProcessingTapGetSourceAudio", (void *)MyMTAudioProcessingTapGetSourceAudio, (void **)&real_MTAudioProcessingTapGetSourceAudio}
-    };
-    int ret = rebind_symbols(rebindings, sizeof(rebindings) / sizeof(rebindings[0]));
-    IGLog("fishhook rebind_symbols returned: %d (0 = success)", ret);
-    IGLog("Hooks: AudioUnitRender=%p, SetProp=%p, AQEnqueue=%p, AQEnqueueParams=%p, MTTap=%p",
-          real_AudioUnitRender, real_AudioUnitSetProperty, real_AudioQueueEnqueueBuffer,
-          real_AudioQueueEnqueueBufferWithParameters, real_MTAudioProcessingTapGetSourceAudio);
+    // 4. Install all interception hooks across all 5 tiers
+    InstallAllInterceptionHooks();
+
+    // 5. Register image listener for dynamically loaded dylibs
+    _dyld_register_func_for_add_image(OnImageAdded);
+
+    IGLog("InstagramReverb Engine Initialized Successfully!");
     IGLog("==================================================================");
 }
