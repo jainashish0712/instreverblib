@@ -408,6 +408,16 @@ static OSStatus (*real_AudioUnitRender)(AudioUnit inUnit,
                                         UInt32 inNumberFrames,
                                         AudioBufferList *ioData) = NULL;
 
+static OSStatus (*real_AudioQueueNewOutput)(
+    const AudioStreamBasicDescription *inFormat,
+    AudioQueueOutputCallback inCallbackProc,
+    void *inUserData,
+    CFRunLoopRef inCallbackRunLoop,
+    CFStringRef inCallbackRunLoopMode,
+    UInt32 inFlags,
+    AudioQueueRef *outAQ
+) = NULL;
+
 static OSStatus (*real_AudioQueueStart)(AudioQueueRef inAQ, const AudioTimeStamp *inStartTime) = NULL;
 static OSStatus (*real_AudioQueueDispose)(AudioQueueRef inAQ, Boolean inImmediate) = NULL;
 
@@ -437,6 +447,92 @@ static OSStatus (*real_MTAudioProcessingTapGetSourceAudio)(
     CMTimeRange *timeRangeOut,
     CMItemCount *numberFramesOut
 ) = NULL;
+
+// ============================================================================
+// FNF AudioQueue Partitioning (Prevents Tap Overwrite & AV-Sync Collisions)
+// ============================================================================
+#define MAX_FNF_AQS 32
+static AudioQueueRef g_fnfAQs[MAX_FNF_AQS] = {NULL};
+static pthread_mutex_t g_fnfMutex = PTHREAD_MUTEX_INITIALIZER;
+static __thread bool s_inFNFCreateAudioQueue = false;
+
+static void RegisterFNFAudioQueue(AudioQueueRef aq) {
+    if (!aq) return;
+    pthread_mutex_lock(&g_fnfMutex);
+    for (int i = 0; i < MAX_FNF_AQS; ++i) {
+        if (g_fnfAQs[i] == aq) {
+            pthread_mutex_unlock(&g_fnfMutex);
+            return;
+        }
+    }
+    for (int i = 0; i < MAX_FNF_AQS; ++i) {
+        if (g_fnfAQs[i] == NULL) {
+            g_fnfAQs[i] = aq;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_fnfMutex);
+}
+
+static bool IsFNFAudioQueue(AudioQueueRef aq) {
+    if (!aq) return false;
+    pthread_mutex_lock(&g_fnfMutex);
+    for (int i = 0; i < MAX_FNF_AQS; ++i) {
+        if (g_fnfAQs[i] == aq) {
+            pthread_mutex_unlock(&g_fnfMutex);
+            return true;
+        }
+    }
+    pthread_mutex_unlock(&g_fnfMutex);
+    return false;
+}
+
+static void RemoveFNFAudioQueue(AudioQueueRef aq) {
+    if (!aq) return;
+    pthread_mutex_lock(&g_fnfMutex);
+    for (int i = 0; i < MAX_FNF_AQS; ++i) {
+        if (g_fnfAQs[i] == aq) {
+            g_fnfAQs[i] = NULL;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_fnfMutex);
+}
+
+static OSStatus MyAudioQueueNewOutput(
+    const AudioStreamBasicDescription *inFormat,
+    AudioQueueOutputCallback inCallbackProc,
+    void *inUserData,
+    CFRunLoopRef inCallbackRunLoop,
+    CFStringRef inCallbackRunLoopMode,
+    UInt32 inFlags,
+    AudioQueueRef *outAQ
+) {
+    OSStatus err = noErr;
+    if (real_AudioQueueNewOutput) {
+        err = real_AudioQueueNewOutput(inFormat, inCallbackProc, inUserData, inCallbackRunLoop, inCallbackRunLoopMode, inFlags, outAQ);
+    } else {
+        err = AudioQueueNewOutput(inFormat, inCallbackProc, inUserData, inCallbackRunLoop, inCallbackRunLoopMode, inFlags, outAQ);
+    }
+
+    if (err == noErr && outAQ && *outAQ) {
+        AudioQueueRef aq = *outAQ;
+        bool isFNF = s_inFNFCreateAudioQueue;
+        if (!isFNF && inUserData) {
+            const char *cls = object_getClassName((__bridge id)inUserData);
+            if (cls && strstr(cls, "FNF")) {
+                isFNF = true;
+            }
+        }
+        if (isFNF) {
+            RegisterFNFAudioQueue(aq);
+            IGLog("[AudioQueue] Registered FNF AudioQueue %p (handled by FNF tap)", aq);
+        } else {
+            IGLog("[AudioQueue] Registered Standard AudioQueue %p (handled by CoreAudio tap)", aq);
+        }
+    }
+    return err;
+}
 
 // ============================================================================
 // TIER 1: CoreAudio AudioQueue Processing Tap Engine (Decoded PCM Interception)
@@ -480,6 +576,11 @@ static void MyAudioQueueProcessingTapCallback(
 
 static void EnsureAudioQueueTapped(AudioQueueRef inAQ) {
     if (!inAQ) return;
+
+    if (IsFNFAudioQueue(inAQ)) {
+        // Managed directly by FNF tap callback. DO NOT attach second tap to prevent collision/stutter!
+        return;
+    }
 
     pthread_mutex_lock(&g_aqMutex);
     for (int i = 0; i < MAX_TRACKED_AQS; ++i) {
@@ -528,10 +629,10 @@ static OSStatus MyAudioQueueStart(AudioQueueRef inAQ, const AudioTimeStamp *inSt
     static uint32_t s_aqStartCount = 0;
     if (s_aqStartCount < 20) {
         s_aqStartCount++;
-        IGLog("[Hook] AudioQueueStart [#%u]: AQ=%p", s_aqStartCount, inAQ);
+        IGLog("[Hook] AudioQueueStart [#%u]: AQ=%p isFNF=%d", s_aqStartCount, inAQ, IsFNFAudioQueue(inAQ));
     }
 
-    if (inAQ) {
+    if (inAQ && !IsFNFAudioQueue(inAQ)) {
         EnsureAudioQueueTapped(inAQ);
     }
 
@@ -543,6 +644,7 @@ static OSStatus MyAudioQueueStart(AudioQueueRef inAQ, const AudioTimeStamp *inSt
 
 static OSStatus MyAudioQueueDispose(AudioQueueRef inAQ, Boolean inImmediate) {
     if (inAQ) {
+        RemoveFNFAudioQueue(inAQ);
         pthread_mutex_lock(&g_aqMutex);
         for (int i = 0; i < MAX_TRACKED_AQS; ++i) {
             if (g_trackedAQs[i].active && g_trackedAQs[i].aq == inAQ) {
@@ -564,12 +666,32 @@ static OSStatus MyAudioQueueDispose(AudioQueueRef inAQ, Boolean inImmediate) {
 
 // ============================================================================
 // TIER 2: Meta FNFCoreAudioWrapper Objective-C Method Swizzle
+// Handles Video / Reel audio processing directly through FNF's native tap
 // ============================================================================
+static void (*orig_FNF_createAudioQueue)(id, SEL) = NULL;
+static void (*orig_FNF_removeAudioQueue)(id, SEL) = NULL;
 static void (*orig_FNF_tapCallback)(id, SEL, AudioQueueProcessingTapRef, UInt32, AudioBufferList *, UInt32) = NULL;
+
+static void swizzled_FNF_createAudioQueue(id self, SEL _cmd) {
+    s_inFNFCreateAudioQueue = true;
+    if (orig_FNF_createAudioQueue) {
+        orig_FNF_createAudioQueue(self, _cmd);
+    }
+    s_inFNFCreateAudioQueue = false;
+}
+
+static void swizzled_FNF_removeAudioQueue(id self, SEL _cmd) {
+    if (orig_FNF_removeAudioQueue) {
+        orig_FNF_removeAudioQueue(self, _cmd);
+    }
+}
 
 static void swizzled_FNF_tapCallback(id self, SEL _cmd, AudioQueueProcessingTapRef tap, UInt32 sourceFlags, AudioBufferList *ioData, UInt32 numFrames) {
     if (orig_FNF_tapCallback) {
         orig_FNF_tapCallback(self, _cmd, tap, sourceFlags, ioData, numFrames);
+    }
+    if (g_dsp.enabled && ioData != NULL && numFrames > 0) {
+        ProcessAudioBufferList(&g_dsp, numFrames, ioData);
     }
 }
 
@@ -577,11 +699,27 @@ static void InitFNFObjCSwizzling(void) {
     Class clsFNF = objc_getClass("FNFCoreAudioWrapper");
     if (clsFNF) {
         SEL selTap = sel_registerName("audioQueueConverterProcessingTapCallback:sourceFlags:ioData:numFrames:");
-        Method m = class_getInstanceMethod(clsFNF, selTap);
-        if (m) {
-            orig_FNF_tapCallback = (void (*)(id, SEL, AudioQueueProcessingTapRef, UInt32, AudioBufferList *, UInt32))method_getImplementation(m);
-            method_setImplementation(m, (IMP)swizzled_FNF_tapCallback);
+        Method mTap = class_getInstanceMethod(clsFNF, selTap);
+        if (mTap) {
+            orig_FNF_tapCallback = (void (*)(id, SEL, AudioQueueProcessingTapRef, UInt32, AudioBufferList *, UInt32))method_getImplementation(mTap);
+            method_setImplementation(mTap, (IMP)swizzled_FNF_tapCallback);
             IGLog("[Swizzle] Hooked FNFCoreAudioWrapper audioQueueConverterProcessingTapCallback!");
+        }
+
+        SEL selCreate = sel_registerName("_createAudioQueue");
+        Method mCreate = class_getInstanceMethod(clsFNF, selCreate);
+        if (mCreate) {
+            orig_FNF_createAudioQueue = (void (*)(id, SEL))method_getImplementation(mCreate);
+            method_setImplementation(mCreate, (IMP)swizzled_FNF_createAudioQueue);
+            IGLog("[Swizzle] Hooked FNFCoreAudioWrapper _createAudioQueue!");
+        }
+
+        SEL selRemove = sel_registerName("_removeAudioQueue");
+        Method mRemove = class_getInstanceMethod(clsFNF, selRemove);
+        if (mRemove) {
+            orig_FNF_removeAudioQueue = (void (*)(id, SEL))method_getImplementation(mRemove);
+            method_setImplementation(mRemove, (IMP)swizzled_FNF_removeAudioQueue);
+            IGLog("[Swizzle] Hooked FNFCoreAudioWrapper _removeAudioQueue!");
         }
     }
 }
@@ -795,7 +933,7 @@ static OSStatus MyAudioQueueEnqueueBufferWithParameters(
     const AudioTimeStamp *inStartTime,
     AudioTimeStamp *outActualStartTime
 ) {
-    if (inAQ) {
+    if (inAQ && !IsFNFAudioQueue(inAQ)) {
         EnsureAudioQueueTapped(inAQ);
     }
 
@@ -817,7 +955,7 @@ static OSStatus MyAudioQueueEnqueueBuffer(AudioQueueRef inAQ,
                                           AudioQueueBufferRef inBuffer,
                                           UInt32 inNumPacketDescs,
                                           const AudioStreamPacketDescription *inPacketDescs) {
-    if (inAQ) {
+    if (inAQ && !IsFNFAudioQueue(inAQ)) {
         EnsureAudioQueueTapped(inAQ);
     }
 
@@ -907,6 +1045,7 @@ static void InstallAllInterceptionHooks(void) {
     void *audioToolboxHandle = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", RTLD_NOW | RTLD_GLOBAL);
     void *mediaToolboxHandle = dlopen("/System/Library/Frameworks/MediaToolbox.framework/MediaToolbox", RTLD_NOW | RTLD_GLOBAL);
 
+    real_AudioQueueNewOutput = (OSStatus (*)(const AudioStreamBasicDescription *, AudioQueueOutputCallback, void *, CFRunLoopRef, CFStringRef, UInt32, AudioQueueRef *))dlsym(audioToolboxHandle ?: RTLD_DEFAULT, "AudioQueueNewOutput");
     real_AudioQueueStart = (OSStatus (*)(AudioQueueRef, const AudioTimeStamp *))dlsym(audioToolboxHandle ?: RTLD_DEFAULT, "AudioQueueStart");
     real_AudioQueueDispose = (OSStatus (*)(AudioQueueRef, Boolean))dlsym(audioToolboxHandle ?: RTLD_DEFAULT, "AudioQueueDispose");
     real_AudioQueueEnqueueBuffer = (OSStatus (*)(AudioQueueRef, AudioQueueBufferRef, UInt32, const AudioStreamPacketDescription *))dlsym(audioToolboxHandle ?: RTLD_DEFAULT, "AudioQueueEnqueueBuffer");
@@ -915,11 +1054,12 @@ static void InstallAllInterceptionHooks(void) {
     real_AudioUnitSetProperty = (OSStatus (*)(AudioUnit, AudioUnitPropertyID, AudioUnitScope, AudioUnitElement, const void *, UInt32))dlsym(audioToolboxHandle ?: RTLD_DEFAULT, "AudioUnitSetProperty");
     real_MTAudioProcessingTapGetSourceAudio = (OSStatus (*)(MTAudioProcessingTapRef, CMItemCount, AudioBufferList *, MTAudioProcessingTapFlags *, CMTimeRange *, CMItemCount *))dlsym(mediaToolboxHandle ?: RTLD_DEFAULT, "MTAudioProcessingTapGetSourceAudio");
 
-    IGLog("[Init] Resolved Real System Functions: AQStart=%p, AQDispose=%p, AURender=%p, AUSetProp=%p",
-          real_AudioQueueStart, real_AudioQueueDispose, real_AudioUnitRender, real_AudioUnitSetProperty);
+    IGLog("[Init] Resolved Real System Functions: AQNew=%p, AQStart=%p, AQDispose=%p, AURender=%p, AUSetProp=%p",
+          real_AudioQueueNewOutput, real_AudioQueueStart, real_AudioQueueDispose, real_AudioUnitRender, real_AudioUnitSetProperty);
 
     // 2. Direct GOT Scanner (Crucial for FBSharedFramework chained fixups)
     IGLog("[GOT Scanner] Scanning GOT entries in FBSharedFramework and Instagram...");
+    PatchGOTPointersInAllImages((void *)real_AudioQueueNewOutput, (void *)MyAudioQueueNewOutput, "AudioQueueNewOutput");
     PatchGOTPointersInAllImages((void *)real_AudioQueueStart, (void *)MyAudioQueueStart, "AudioQueueStart");
     PatchGOTPointersInAllImages((void *)real_AudioQueueDispose, (void *)MyAudioQueueDispose, "AudioQueueDispose");
     PatchGOTPointersInAllImages((void *)real_AudioUnitRender, (void *)MyAudioUnitRender, "AudioUnitRender");
