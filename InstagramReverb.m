@@ -526,7 +526,8 @@ static OSStatus (*real_AudioQueueEnqueueBufferWithParameters)(
     AudioQueueBufferRef inBuffer,
     UInt32 inNumPacketDescs,
     const AudioStreamPacketDescription *inPacketDescs,
-    UInt32 inImmediateModifiers,
+    UInt32 inTrimFramesAtStart,
+    UInt32 inTrimFramesAtEnd,
     UInt32 inNumParamValues,
     const AudioQueueParameterEvent *inParamValues,
     const AudioTimeStamp *inStartTime,
@@ -538,7 +539,8 @@ static OSStatus MyAudioQueueEnqueueBufferWithParameters(
     AudioQueueBufferRef inBuffer,
     UInt32 inNumPacketDescs,
     const AudioStreamPacketDescription *inPacketDescs,
-    UInt32 inImmediateModifiers,
+    UInt32 inTrimFramesAtStart,
+    UInt32 inTrimFramesAtEnd,
     UInt32 inNumParamValues,
     const AudioQueueParameterEvent *inParamValues,
     const AudioTimeStamp *inStartTime,
@@ -575,13 +577,13 @@ static OSStatus MyAudioQueueEnqueueBufferWithParameters(
     if (real_AudioQueueEnqueueBufferWithParameters) {
         return real_AudioQueueEnqueueBufferWithParameters(
             inAQ, inBuffer, inNumPacketDescs, inPacketDescs,
-            inImmediateModifiers, inNumParamValues, inParamValues,
+            inTrimFramesAtStart, inTrimFramesAtEnd, inNumParamValues, inParamValues,
             inStartTime, outActualStartTime
         );
     }
     return AudioQueueEnqueueBufferWithParameters(
         inAQ, inBuffer, inNumPacketDescs, inPacketDescs,
-        inImmediateModifiers, inNumParamValues, inParamValues,
+        inTrimFramesAtStart, inTrimFramesAtEnd, inNumParamValues, inParamValues,
         inStartTime, outActualStartTime
     );
 }

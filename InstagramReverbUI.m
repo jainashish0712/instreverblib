@@ -367,7 +367,10 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         [_contentContainer addSubview:_volumeValLabel];
 
         _volumeView = [[MPVolumeView alloc] init];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         _volumeView.showsRouteButton = NO;
+#pragma clang diagnostic pop
         _volumeView.tintColor = ACCENT_COLOR;
         [_volumeView setVolumeThumbImage:thumb forState:UIControlStateNormal];
         [_volumeView setVolumeThumbImage:thumb forState:UIControlStateHighlighted];
@@ -732,8 +735,12 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         CGRect screenBounds = [UIScreen mainScreen].bounds;
 
         if (!self.overlayWindow) {
-            if (scene && @available(iOS 13.0, *)) {
-                self.overlayWindow = [[InstagramReverbOverlayWindow alloc] initWithWindowScene:scene];
+            if (@available(iOS 13.0, *)) {
+                if (scene) {
+                    self.overlayWindow = [[InstagramReverbOverlayWindow alloc] initWithWindowScene:scene];
+                } else {
+                    self.overlayWindow = [[InstagramReverbOverlayWindow alloc] initWithFrame:screenBounds];
+                }
             } else {
                 self.overlayWindow = [[InstagramReverbOverlayWindow alloc] initWithFrame:screenBounds];
             }
