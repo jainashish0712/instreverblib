@@ -15,8 +15,115 @@
 #import <pthread.h>
 #import <mach/mach.h>
 #import <mach/vm_map.h>
+#import <execinfo.h>
+#import <signal.h>
+#import <unistd.h>
+#import <fcntl.h>
+#import <time.h>
 #import "InstagramReverb.h"
 #import "fishhook.h"
+
+// ============================================================================
+// Runtime File-Based Diagnostic Logger & Crash Reporter
+// ============================================================================
+static FILE *g_logFile = NULL;
+static char g_logFilePath[1024] = {0};
+static char g_crashFilePath[1024] = {0};
+static pthread_mutex_t g_logMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void IGLog(const char *format, ...) {
+    char msg[1024];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(msg, sizeof(msg), format, args);
+    va_end(args);
+
+    // 1. Console / os_log / syslog
+    NSLog(@"[InstagramReverb] %s", msg);
+
+    // 2. Thread-safe persistent file logging
+    pthread_mutex_lock(&g_logMutex);
+    if (g_logFile) {
+        time_t rawtime;
+        struct tm *timeinfo;
+        char timeBuf[32];
+        time(&rawtime);
+        timeinfo = localtime(&rawtime);
+        strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", timeinfo);
+        fprintf(g_logFile, "[%s] %s\n", timeBuf, msg);
+        fflush(g_logFile);
+    }
+    pthread_mutex_unlock(&g_logMutex);
+}
+
+// POSIX Signal Handler for SIGSEGV, SIGBUS, SIGABRT, SIGILL
+static void SignalCrashHandler(int sig, siginfo_t *info, void *context) {
+    const char *sigName = (sig == SIGSEGV) ? "SIGSEGV (Segmentation Fault)" :
+                          (sig == SIGBUS)  ? "SIGBUS (Bus Error / Bad Memory Access)" :
+                          (sig == SIGABRT) ? "SIGABRT (Abort / Assertion Failure)" :
+                          (sig == SIGILL)  ? "SIGILL (Illegal Instruction)" : "UNKNOWN SIGNAL";
+
+    int fd = open(g_crashFilePath[0] ? g_crashFilePath : "/tmp/InstagramReverb_crash.log",
+                  O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        time_t rawtime;
+        time(&rawtime);
+        char header[512];
+        int hlen = snprintf(header, sizeof(header),
+            "\n==================================================================\n"
+            "FATAL CRASH TRAPPED BY INSTAGRAM REVERB\n"
+            "Timestamp: %ld\n"
+            "Signal: %d -> %s\n"
+            "Fault Address: %p\n"
+            "Thread: %p\n"
+            "------------------------------------------------------------------\n"
+            "Backtrace Frames:\n",
+            (long)rawtime, sig, sigName, info ? info->si_addr : NULL, (void *)pthread_self());
+        write(fd, header, hlen);
+
+        void *callstack[64];
+        int frames = backtrace(callstack, 64);
+        char **symbols = backtrace_symbols(callstack, frames);
+        if (symbols) {
+            for (int i = 0; i < frames; ++i) {
+                char frameBuf[512];
+                int flen = snprintf(frameBuf, sizeof(frameBuf), "  [%02d] %s\n", i, symbols[i]);
+                write(fd, frameBuf, flen);
+            }
+            free(symbols);
+        }
+        write(fd, "==================================================================\n", 67);
+        fsync(fd);
+        close(fd);
+    }
+
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void UncaughtExceptionHandler(NSException *exception) {
+    int fd = open(g_crashFilePath[0] ? g_crashFilePath : "/tmp/InstagramReverb_crash.log",
+                  O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        char buf[1024];
+        int len = snprintf(buf, sizeof(buf),
+            "\n==================================================================\n"
+            "UNCAUGHT OBJC EXCEPTION: %s\n"
+            "Reason: %s\n"
+            "Call Stack:\n",
+            [exception.name UTF8String],
+            [exception.reason UTF8String]);
+        write(fd, buf, len);
+        for (NSString *symbol in exception.callStackSymbols) {
+            char symBuf[512];
+            int slen = snprintf(symBuf, sizeof(symBuf), "  %s\n", [symbol UTF8String]);
+            write(fd, symBuf, slen);
+        }
+        write(fd, "==================================================================\n", 67);
+        fsync(fd);
+        close(fd);
+    }
+}
 
 #define PITCH_BUFFER_SIZE 4096
 #define PITCH_GRAIN_SIZE  2048.0f
@@ -359,6 +466,7 @@ static OSStatus MyAudioUnitSetProperty(AudioUnit inUnit,
                 AURenderCallbackStruct newStruct;
                 newStruct.inputProc = WrappedRenderCallback;
                 newStruct.inputProcRefCon = &sWrappers[idx];
+                IGLog("[Hook] AudioUnitSetProperty: Hooked AURenderCallback on unit %p (idx=%d)", inUnit, idx);
                 if (real_AudioUnitSetProperty) {
                     return real_AudioUnitSetProperty(inUnit, inID, inScope, inElement, &newStruct, sizeof(newStruct));
                 }
@@ -388,6 +496,15 @@ static OSStatus MyAudioUnitRender(AudioUnit inUnit,
                                   UInt32 inOutputBusNumber,
                                   UInt32 inNumberFrames,
                                   AudioBufferList *ioData) {
+    static uint32_t s_auRenderCount = 0;
+    if (s_auRenderCount < 20) {
+        s_auRenderCount++;
+        IGLog("[Hook] AudioUnitRender [#%u]: unit=%p frames=%u bufs=%u data0=%p",
+              s_auRenderCount, inUnit, (unsigned int)inNumberFrames,
+              (unsigned int)(ioData ? ioData->mNumberBuffers : 0),
+              (ioData && ioData->mNumberBuffers > 0) ? ioData->mBuffers[0].mData : NULL);
+    }
+
     OSStatus status = noErr;
     if (real_AudioUnitRender) {
         status = real_AudioUnitRender(inUnit, ioActionFlags, inTimeStamp, inOutputBusNumber, inNumberFrames, ioData);
@@ -427,6 +544,24 @@ static OSStatus MyAudioQueueEnqueueBufferWithParameters(
     const AudioTimeStamp *inStartTime,
     AudioTimeStamp *outActualStartTime
 ) {
+    static uint32_t s_aqParamsCount = 0;
+    if (s_aqParamsCount < 20) {
+        s_aqParamsCount++;
+        AudioStreamBasicDescription asbd;
+        memset(&asbd, 0, sizeof(asbd));
+        UInt32 propSize = sizeof(asbd);
+        AudioQueueGetProperty(inAQ, kAudioQueueProperty_StreamDescription, &asbd, &propSize);
+        char fourcc[5] = {0};
+        uint32_t beFormat = CFSwapInt32HostToBig(asbd.mFormatID);
+        memcpy(fourcc, &beFormat, 4);
+        IGLog("[Hook] AQEnqueueParams [#%u]: AQ=%p bytes=%u pkts=%u format='%s'(0x%08x) rate=%.1f ch=%u bits=%u",
+              s_aqParamsCount, inAQ,
+              inBuffer ? (unsigned int)inBuffer->mAudioDataByteSize : 0,
+              (unsigned int)inNumPacketDescs,
+              fourcc, (unsigned int)asbd.mFormatID, asbd.mSampleRate,
+              (unsigned int)asbd.mChannelsPerFrame, (unsigned int)asbd.mBitsPerChannel);
+    }
+
     if (g_dsp.enabled && inBuffer && inBuffer->mAudioData && inBuffer->mAudioDataByteSize > 0 && inNumPacketDescs == 0) {
         AudioStreamBasicDescription asbd;
         UInt32 propSize = sizeof(asbd);
@@ -463,6 +598,23 @@ static OSStatus MyAudioQueueEnqueueBuffer(AudioQueueRef inAQ,
                                           AudioQueueBufferRef inBuffer,
                                           UInt32 inNumPacketDescs,
                                           const AudioStreamPacketDescription *inPacketDescs) {
+    static uint32_t s_aqStdCount = 0;
+    if (s_aqStdCount < 20) {
+        s_aqStdCount++;
+        AudioStreamBasicDescription asbd;
+        memset(&asbd, 0, sizeof(asbd));
+        UInt32 propSize = sizeof(asbd);
+        AudioQueueGetProperty(inAQ, kAudioQueueProperty_StreamDescription, &asbd, &propSize);
+        char fourcc[5] = {0};
+        uint32_t beFormat = CFSwapInt32HostToBig(asbd.mFormatID);
+        memcpy(fourcc, &beFormat, 4);
+        IGLog("[Hook] AQEnqueueStd [#%u]: AQ=%p bytes=%u pkts=%u format='%s'(0x%08x) rate=%.1f ch=%u",
+              s_aqStdCount, inAQ,
+              inBuffer ? (unsigned int)inBuffer->mAudioDataByteSize : 0,
+              (unsigned int)inNumPacketDescs,
+              fourcc, (unsigned int)asbd.mFormatID, asbd.mSampleRate, (unsigned int)asbd.mChannelsPerFrame);
+    }
+
     if (g_dsp.enabled && inBuffer && inBuffer->mAudioData && inBuffer->mAudioDataByteSize > 0 && inNumPacketDescs == 0) {
         AudioStreamBasicDescription asbd;
         UInt32 propSize = sizeof(asbd);
@@ -499,6 +651,15 @@ static OSStatus MyMTAudioProcessingTapGetSourceAudio(
     CMTimeRange *timeRangeOut,
     CMItemCount *numberFramesOut
 ) {
+    static uint32_t s_mtTapCount = 0;
+    if (s_mtTapCount < 20) {
+        s_mtTapCount++;
+        IGLog("[Hook] MTTapGetSourceAudio [#%u]: tap=%p frames=%lu bufs=%u data0=%p",
+              s_mtTapCount, tap, (unsigned long)numberFrames,
+              (unsigned int)(bufferListInOut ? bufferListInOut->mNumberBuffers : 0),
+              (bufferListInOut && bufferListInOut->mNumberBuffers > 0) ? bufferListInOut->mBuffers[0].mData : NULL);
+    }
+
     OSStatus status = noErr;
     if (real_MTAudioProcessingTapGetSourceAudio) {
         status = real_MTAudioProcessingTapGetSourceAudio(
@@ -519,51 +680,6 @@ static OSStatus MyMTAudioProcessingTapGetSourceAudio(
     return status;
 }
 
-// ============================================================================
-// DYLD_INTERPOSE Load-Time Linking Table (AudioUnit + AudioQueue + MediaToolbox)
-// ============================================================================
-#if defined(__has_feature) && __has_feature(address_sanitizer)
-#else
-__attribute__((used)) static const struct {
-    const void *replacement;
-    const void *replacee;
-} interpose_AudioUnitRender __attribute__((section("__DATA,__interpose"))) = {
-    (const void *)(uintptr_t)MyAudioUnitRender,
-    (const void *)(uintptr_t)AudioUnitRender
-};
-
-__attribute__((used)) static const struct {
-    const void *replacement;
-    const void *replacee;
-} interpose_AudioUnitSetProperty __attribute__((section("__DATA,__interpose"))) = {
-    (const void *)(uintptr_t)MyAudioUnitSetProperty,
-    (const void *)(uintptr_t)AudioUnitSetProperty
-};
-
-__attribute__((used)) static const struct {
-    const void *replacement;
-    const void *replacee;
-} interpose_AudioQueueEnqueueBuffer __attribute__((section("__DATA,__interpose"))) = {
-    (const void *)(uintptr_t)MyAudioQueueEnqueueBuffer,
-    (const void *)(uintptr_t)AudioQueueEnqueueBuffer
-};
-
-__attribute__((used)) static const struct {
-    const void *replacement;
-    const void *replacee;
-} interpose_AudioQueueEnqueueBufferWithParameters __attribute__((section("__DATA,__interpose"))) = {
-    (const void *)(uintptr_t)MyAudioQueueEnqueueBufferWithParameters,
-    (const void *)(uintptr_t)AudioQueueEnqueueBufferWithParameters
-};
-
-__attribute__((used)) static const struct {
-    const void *replacement;
-    const void *replacee;
-} interpose_MTAudioProcessingTapGetSourceAudio __attribute__((section("__DATA,__interpose"))) = {
-    (const void *)(uintptr_t)MyMTAudioProcessingTapGetSourceAudio,
-    (const void *)(uintptr_t)MTAudioProcessingTapGetSourceAudio
-};
-#endif
 
 // ============================================================================
 // Public C API Implementation
@@ -633,6 +749,36 @@ void InstagramReverb_ResetDefaults(void) {
 // ============================================================================
 __attribute__((constructor))
 static void InstagramReverbInit(void) {
+    // 1. Install Signal Crash Handler (SIGSEGV, SIGBUS, SIGABRT, SIGILL)
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = SignalCrashHandler;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+
+    NSSetUncaughtExceptionHandler(&UncaughtExceptionHandler);
+
+    // 2. Initialize Persistent File Logger in Documents/
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docDir = paths.firstObject;
+    if (docDir) {
+        NSString *logPath = [docDir stringByAppendingPathComponent:@"InstagramReverb.log"];
+        NSString *crashPath = [docDir stringByAppendingPathComponent:@"InstagramReverb_crash.log"];
+        snprintf(g_logFilePath, sizeof(g_logFilePath), "%s", [logPath UTF8String]);
+        snprintf(g_crashFilePath, sizeof(g_crashFilePath), "%s", [crashPath UTF8String]);
+        g_logFile = fopen(g_logFilePath, "a");
+    }
+
+    IGLog("==================================================================");
+    IGLog("InstagramReverb Engine Initializing... PID: %d, App: %s",
+          getpid(), [[[NSBundle mainBundle] bundleIdentifier] UTF8String] ?: "Unknown");
+    IGLog("Log file: %s", g_logFilePath[0] ? g_logFilePath : "Failed to resolve Documents dir");
+    IGLog("Crash log file: %s", g_crashFilePath[0] ? g_crashFilePath : "Failed to resolve Documents dir");
+
     memset(&g_dsp, 0, sizeof(ReverbDSP));
     pthread_mutex_init(&g_dsp.lock, NULL);
 
@@ -670,5 +816,10 @@ static void InstagramReverbInit(void) {
         {"AudioQueueEnqueueBufferWithParameters", (void *)MyAudioQueueEnqueueBufferWithParameters, (void **)&real_AudioQueueEnqueueBufferWithParameters},
         {"MTAudioProcessingTapGetSourceAudio", (void *)MyMTAudioProcessingTapGetSourceAudio, (void **)&real_MTAudioProcessingTapGetSourceAudio}
     };
-    rebind_symbols(rebindings, sizeof(rebindings) / sizeof(rebindings[0]));
+    int ret = rebind_symbols(rebindings, sizeof(rebindings) / sizeof(rebindings[0]));
+    IGLog("fishhook rebind_symbols returned: %d (0 = success)", ret);
+    IGLog("Hooks: AudioUnitRender=%p, SetProp=%p, AQEnqueue=%p, AQEnqueueParams=%p, MTTap=%p",
+          real_AudioUnitRender, real_AudioUnitSetProperty, real_AudioQueueEnqueueBuffer,
+          real_AudioQueueEnqueueBufferWithParameters, real_MTAudioProcessingTapGetSourceAudio);
+    IGLog("==================================================================");
 }
