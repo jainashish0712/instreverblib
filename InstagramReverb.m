@@ -33,6 +33,7 @@
 #import <time.h>
 #import "InstagramReverb.h"
 #import "InstagramWifiSpoofer.h"
+#import "InstagramDash1440p.h"
 #import "fishhook.h"
 
 #ifdef __LP64__
@@ -1208,6 +1209,9 @@ static void InstagramReverbInit(void) {
     // 5. Initialize Automatic Wi-Fi Spoofing Engine (forces 1080p Reels streaming)
     InstagramWifiSpoofer_Init();
 
-    // IGLog("InstagramReverb Engine Initialized Successfully!");
+    // 6. Initialize Ultra-HD 1440p DASH Video Streaming Engine
+    InstagramDash1440p_Init();
+
+    IGLog("InstagramReverb Engine Initialized Successfully!");
     // IGLog("==================================================================");
 }

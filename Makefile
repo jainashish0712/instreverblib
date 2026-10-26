@@ -5,7 +5,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = InstagramReverb
 
-InstagramReverb_FILES = InstagramReverb.m InstagramReverbUI.m InstagramWifiSpoofer.m fishhook.c
+InstagramReverb_FILES = InstagramReverb.m InstagramReverbUI.m InstagramWifiSpoofer.m InstagramDash1440p.m fishhook.c
 InstagramReverb_CFLAGS = -fobjc-arc -O3
 InstagramReverb_FRAMEWORKS = AudioToolbox MediaToolbox CoreMedia Foundation UIKit CoreGraphics QuartzCore MediaPlayer AVFoundation SystemConfiguration Network
 

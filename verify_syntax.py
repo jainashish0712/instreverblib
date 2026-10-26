@@ -369,6 +369,27 @@ def test_file_integrity():
         c_close = m_wifi.count(close_ch)
         assert c_open == c_close, f"Unbalanced {name} in InstagramWifiSpoofer.m: {c_open} open vs {c_close} close!"
 
+    # DASH 1440p validation
+    with open(f"{base_dir}/InstagramDash1440p.h", "r", encoding="utf-8") as f:
+        h_dash = f.read()
+    with open(f"{base_dir}/InstagramDash1440p.m", "r", encoding="utf-8") as f:
+        m_dash = f.read()
+
+    assert "InstagramDash1440p_Init" in h_dash
+    assert "InstagramDash1440p_IsActive" in h_dash
+    assert "InstagramDash1440p_Init" in m_dash
+    assert "InstagramDash1440p_IsActive" in m_dash
+    assert "SelectHighestRepresentation" in m_dash
+    assert "Hook_SelectQualityFromRepsWithBandwidth" in m_dash
+    assert "Hook_Return1440pSize" in m_dash
+    assert "InstagramDash1440p.m" in mk
+    assert "InstagramDash1440p.m" in bsh
+
+    for open_ch, close_ch, name in [('{', '}', 'Curly Braces'), ('(', ')', 'Parentheses'), ('[', ']', 'Square Brackets')]:
+        c_open = m_dash.count(open_ch)
+        c_close = m_dash.count(close_ch)
+        assert c_open == c_close, f"Unbalanced {name} in InstagramDash1440p.m: {c_open} open vs {c_close} close!"
+
     print("   -> PASS: All headers, build files, and implementations are fully synchronized.\n")
 
 if __name__ == "__main__":
