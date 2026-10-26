@@ -126,8 +126,8 @@ static void SignalCrashHandler(int sig, siginfo_t *info, void *context) {
 
 static void UncaughtExceptionHandler(NSException *exception) {
     // IGLog("[CRASH] Uncaught NSException: %s Reason: %s",
-          [exception.name UTF8String] ?: "Unknown",
-          [exception.reason UTF8String] ?: "None");
+    //       [exception.name UTF8String] ?: "Unknown",
+    //       [exception.reason UTF8String] ?: "None");
     NSArray *stack = [exception callStackSymbols];
     // for (NSString *frame in stack) {
     //     IGLog("  %s", [frame UTF8String]);
@@ -1154,7 +1154,7 @@ static void InstagramReverbInit(void) {
     sigaction(SIGABRT, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
 
-    NSSetUncaughtExceptionHandler(&UncaughtExceptionHandler);
+    // NSSetUncaughtExceptionHandler(&UncaughtExceptionHandler);
 
     // 2. Initialize Persistent File Logger in Documents/
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
