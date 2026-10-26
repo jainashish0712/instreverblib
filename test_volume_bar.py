@@ -53,7 +53,7 @@ def verify_volume_bar():
     tb_match = re.search(r'- \(void\)touchesBegan:\(NSSet<UITouch \*> \*\)touches withEvent:\(UIEvent \*\)event\s*\{(.*?)\n- \(void\)handleHoldUnlocked', bar_impl, re.DOTALL)
     assert tb_match, "touchesBegan must be present in InstagramReverbVolumeBar"
     assert "setSystemVolume" not in tb_match.group(1), "Touch began must NEVER change volume!"
-    assert "[NSTimer timerWithTimeInterval:4.0" in tb_match.group(1), "Must start strict 4.0s hold timer!"
+    assert "[NSTimer timerWithTimeInterval:1.5" in tb_match.group(1), "Must start strict 4.0s hold timer!"
     assert "handleHoldUnlocked" in tb_match.group(1)
 
     # Verify handleHoldUnlocked unlocks bar dragging

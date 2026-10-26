@@ -314,7 +314,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     // Start strict 4.0-second hold timer to unlock dragging anywhere
     [self.holdTimer invalidate];
     __weak typeof(self) weakSelf = self;
-    self.holdTimer = [NSTimer timerWithTimeInterval:4.0
+    self.holdTimer = [NSTimer timerWithTimeInterval:1.5
                                              target:weakSelf
                                            selector:@selector(handleHoldUnlocked)
                                            userInfo:nil
