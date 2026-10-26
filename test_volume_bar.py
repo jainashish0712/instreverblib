@@ -14,7 +14,7 @@ def verify_volume_bar():
         code = f.read()
 
     # 1. Verify Class Definition & Properties
-    assert "@interface InstagramReverbVolumeBar : UIView <UIGestureRecognizerDelegate>" in code
+    assert "@interface InstagramReverbVolumeBar : UIView" in code
     assert "@property (nonatomic, strong) UIVisualEffectView *blurView;" in code
     assert "@property (nonatomic, strong) UIView *fillView;" in code
     assert "@property (nonatomic, strong) MPVolumeView *internalVolumeView;" in code
@@ -46,13 +46,35 @@ def verify_volume_bar():
     assert "AVSystemController_SystemVolumeDidChangeNotification" in code
     print("   [4/6] PASS: Native system volume reading (AVAudioSession) and programmatic setting (MPVolumeView) verified.")
 
-    # 5. Verify Gesture Handling (Draggable Repositioning + Vertical Volume Sliding)
-    assert "UIPanGestureRecognizer *panGesture" in code or "_panGesture = [[UIPanGestureRecognizer alloc]" in code
-    assert "UILongPressGestureRecognizer *longPressGesture" in code or "_longPressGesture = [[UILongPressGestureRecognizer alloc]" in code
-    assert "UITapGestureRecognizer *tapGesture" in code or "_tapGesture = [[UITapGestureRecognizer alloc]" in code
-    assert "self.isRepositioning" in code
-    assert "1.0f - (pt.y / self.bounds.size.height)" in code
-    print("   [5/6] PASS: Dual-mode interaction verified: slide vertically to adjust volume, hold/pan to drag bar anywhere.")
+    # 5. Verify Touch State Machine: Touch = NO Volume Change, Swipe = Volume Only, 4s Hold = Reposition
+    bar_impl = code.split("@implementation InstagramReverbVolumeBar")[1].split("@end")[0]
+
+    # Verify touchesBegan does NOT change volume and starts 4.0s hold timer
+    tb_match = re.search(r'- \(void\)touchesBegan:\(NSSet<UITouch \*> \*\)touches withEvent:\(UIEvent \*\)event\s*\{(.*?)\n- \(void\)handleHoldUnlocked', bar_impl, re.DOTALL)
+    assert tb_match, "touchesBegan must be present in InstagramReverbVolumeBar"
+    assert "setSystemVolume" not in tb_match.group(1), "Touch began must NEVER change volume!"
+    assert "[NSTimer timerWithTimeInterval:4.0" in tb_match.group(1), "Must start strict 4.0s hold timer!"
+    assert "handleHoldUnlocked" in tb_match.group(1)
+
+    # Verify handleHoldUnlocked unlocks bar dragging
+    hu_match = re.search(r'- \(void\)handleHoldUnlocked\s*\{(.*?)\n- \(void\)touchesMoved', bar_impl, re.DOTALL)
+    assert hu_match, "handleHoldUnlocked must be present"
+    assert "self.isDraggingBar = YES;" in hu_match.group(1)
+
+    # Verify touchesMoved: changes volume only when swiping (>= 5pt), moves self.center only when 4s hold unlocked
+    tm_match = re.search(r'- \(void\)touchesMoved:\(NSSet<UITouch \*> \*\)touches withEvent:\(UIEvent \*\)event\s*\{(.*?)\n- \(void\)touchesEnded', bar_impl, re.DOTALL)
+    assert tm_match, "touchesMoved must be present in InstagramReverbVolumeBar"
+    assert "if (self.isDraggingBar)" in tm_match.group(1), "Must guard self.center modification behind isDraggingBar!"
+    assert "self.center = pt;" in tm_match.group(1)
+    assert "fabs(deltaY) >= 5.0f" in tm_match.group(1), "Must require at least 5pt movement to swipe volume!"
+    assert "setSystemVolume" in tm_match.group(1), "Swiping must change volume!"
+
+    # Verify touchesEnded cancels hold timer
+    te_match = re.search(r'- \(void\)touchesEnded:\(NSSet<UITouch \*> \*\)touches withEvent:\(UIEvent \*\)event\s*\{(.*?)\n- \(void\)touchesCancelled', bar_impl, re.DOTALL)
+    assert te_match, "touchesEnded must be present in InstagramReverbVolumeBar"
+    assert "[self.holdTimer invalidate];" in te_match.group(1)
+
+    print("   [5/6] PASS: Touch state machine verified: Touch does not change volume, swipe changes volume only, 4s hold unlocks dragging.")
 
     # 6. Verify Screen Clamping & Geometry across iPhone Screen Sizes
     for screen_w, screen_h in [(375.0, 667.0), (390.0, 844.0), (393.0, 852.0), (430.0, 932.0)]:

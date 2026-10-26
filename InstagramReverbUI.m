@@ -154,7 +154,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 // ============================================================================
 // Separate Thin Vertical 70x20px Draggable System Volume Bar
 // ============================================================================
-@interface InstagramReverbVolumeBar : UIView <UIGestureRecognizerDelegate>
+@interface InstagramReverbVolumeBar : UIView
 
 @property (nonatomic, strong) UIVisualEffectView *blurView;
 @property (nonatomic, strong) UIView *trackView;
@@ -162,12 +162,12 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 @property (nonatomic, strong) MPVolumeView *internalVolumeView;
 @property (nonatomic, strong) NSTimer *inactivityTimer;
 
-@property (nonatomic, strong) UIPanGestureRecognizer *panGesture;
-@property (nonatomic, strong) UILongPressGestureRecognizer *longPressGesture;
-@property (nonatomic, strong) UITapGestureRecognizer *tapGesture;
-
-@property (nonatomic, assign) CGPoint panStartCenter;
-@property (nonatomic, assign) BOOL isRepositioning;
+// Touch, Swipe & 4-Second Hold Drag State
+@property (nonatomic, strong) NSTimer *holdTimer;
+@property (nonatomic, assign) CGPoint touchDownPoint;
+@property (nonatomic, assign) float touchDownVolume;
+@property (nonatomic, assign) BOOL isSwipingVolume;
+@property (nonatomic, assign) BOOL isDraggingBar;
 
 - (float)currentSystemVolume;
 - (void)updateFillForVolume:(float)volume;
@@ -211,22 +211,6 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         _internalVolumeView.userInteractionEnabled = NO;
         [self addSubview:_internalVolumeView];
 
-        // Gestures: Tap to set volume, Pan to slide volume or drag bar, LongPress to reposition
-        _tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
-        _tapGesture.cancelsTouchesInView = NO;
-        [self addGestureRecognizer:_tapGesture];
-
-        _panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-        _panGesture.delegate = self;
-        _panGesture.cancelsTouchesInView = NO;
-        [self addGestureRecognizer:_panGesture];
-
-        _longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-        _longPressGesture.minimumPressDuration = 0.25;
-        _longPressGesture.delegate = self;
-        _longPressGesture.cancelsTouchesInView = NO;
-        [self addGestureRecognizer:_longPressGesture];
-
         // Observers for system volume changes (hardware buttons, headphones, etc.)
         @try {
             [[AVAudioSession sharedInstance] addObserver:self
@@ -250,6 +234,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         [[AVAudioSession sharedInstance] removeObserver:self forKeyPath:@"outputVolume"];
     } @catch (NSException *e) {}
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_holdTimer invalidate];
     [_inactivityTimer invalidate];
 }
 
@@ -307,74 +292,63 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesBegan:touches withEvent:event];
-    [self revealAndResetTimer];
-}
 
-- (void)handleTap:(UITapGestureRecognizer *)tap {
-    [self revealAndResetTimer];
-    CGPoint pt = [tap locationInView:self];
-    CGFloat ratio = 1.0f - (pt.y / self.bounds.size.height);
-    ratio = fmaxf(0.0f, fminf(1.0f, ratio));
-    [self setSystemVolume:ratio];
-}
+    UITouch *touch = [touches anyObject];
+    if (!touch) return;
 
-- (void)handlePan:(UIPanGestureRecognizer *)pan {
-    UIView *superview = self.superview;
-    if (!superview) return;
-
-    [self revealAndResetTimer];
-
-    if (pan.state == UIGestureRecognizerStateBegan) {
-        self.panStartCenter = self.center;
-        CGPoint velocity = [pan velocityInView:self];
-        self.isRepositioning = (fabs(velocity.x) > fabs(velocity.y) && fabs(velocity.x) > 40.0f);
-    }
-
-    if (self.isRepositioning) {
-        CGPoint translation = [pan translationInView:superview];
-        CGPoint newCenter = CGPointMake(self.panStartCenter.x + translation.x,
-                                        self.panStartCenter.y + translation.y);
-
-        CGRect bounds = superview.bounds;
-        CGFloat halfW = self.bounds.size.width / 2.0f;
-        CGFloat halfH = self.bounds.size.height / 2.0f;
-        CGFloat minX = halfW + 4.0f;
-        CGFloat maxX = bounds.size.width - halfW - 4.0f;
-        CGFloat minY = halfH + 40.0f;
-        CGFloat maxY = bounds.size.height - halfH - 20.0f;
-
-        newCenter.x = fmaxf(minX, fminf(maxX, newCenter.x));
-        newCenter.y = fmaxf(minY, fminf(maxY, newCenter.y));
-        self.center = newCenter;
-    } else {
-        CGPoint pt = [pan locationInView:self];
-        CGFloat ratio = 1.0f - (pt.y / self.bounds.size.height);
-        ratio = fmaxf(0.0f, fminf(1.0f, ratio));
-        [self setSystemVolume:ratio];
-    }
-
-    if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
-        self.isRepositioning = NO;
-        [self revealAndResetTimer];
-    }
-}
-
-- (void)handleLongPress:(UILongPressGestureRecognizer *)lp {
-    UIView *superview = self.superview;
-    if (!superview) return;
-
-    [self revealAndResetTimer];
-
-    if (lp.state == UIGestureRecognizerStateBegan) {
-        if (@available(iOS 10.0, *)) {
-            UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-            [feedback impactOccurred];
-        }
+    // Wake up bar to 100% opacity on touch; pause inactivity timer while touching
+    [self.inactivityTimer invalidate];
+    self.inactivityTimer = nil;
+    if (self.alpha < 1.0f) {
         [UIView animateWithDuration:0.15 animations:^{
-            self.transform = CGAffineTransformMakeScale(1.15f, 1.15f);
+            self.alpha = 1.0f;
         }];
-    } else if (lp.state == UIGestureRecognizerStateChanged) {
-        CGPoint pt = [lp locationInView:superview];
+    }
+
+    // Record initial touch state (NO volume change on touch!)
+    self.touchDownPoint = [touch locationInView:self];
+    self.touchDownVolume = [self currentSystemVolume];
+    self.isSwipingVolume = NO;
+    self.isDraggingBar = NO;
+
+    // Start strict 4.0-second hold timer to unlock dragging anywhere
+    [self.holdTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    self.holdTimer = [NSTimer timerWithTimeInterval:4.0
+                                             target:weakSelf
+                                           selector:@selector(handleHoldUnlocked)
+                                           userInfo:nil
+                                            repeats:NO];
+    [[NSRunLoop mainRunLoop] addTimer:self.holdTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)handleHoldUnlocked {
+    self.isDraggingBar = YES;
+    self.isSwipingVolume = NO;
+
+    if (@available(iOS 10.0, *)) {
+        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
+        [feedback impactOccurred];
+    }
+
+    [UIView animateWithDuration:0.2 animations:^{
+        self.transform = CGAffineTransformMakeScale(1.18f, 1.18f);
+        self.layer.borderColor = [UIColor whiteColor].CGColor;
+    }];
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesMoved:touches withEvent:event];
+
+    UITouch *touch = [touches anyObject];
+    if (!touch) return;
+
+    UIView *superview = self.superview;
+    if (!superview) return;
+
+    // 1. If 4-second hold unlocked, drag the bar anywhere across the screen
+    if (self.isDraggingBar) {
+        CGPoint pt = [touch locationInView:superview];
         CGRect bounds = superview.bounds;
         CGFloat halfW = self.bounds.size.width / 2.0f;
         CGFloat halfH = self.bounds.size.height / 2.0f;
@@ -386,16 +360,64 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         pt.x = fmaxf(minX, fminf(maxX, pt.x));
         pt.y = fmaxf(minY, fminf(maxY, pt.y));
         self.center = pt;
-    } else if (lp.state == UIGestureRecognizerStateEnded || lp.state == UIGestureRecognizerStateCancelled) {
-        [UIView animateWithDuration:0.15 animations:^{
-            self.transform = CGAffineTransformIdentity;
-        }];
-        [self revealAndResetTimer];
+        return;
+    }
+
+    // 2. Otherwise check for intentional vertical swipe to change volume
+    CGPoint currentPoint = [touch locationInView:self];
+    CGFloat deltaY = self.touchDownPoint.y - currentPoint.y; // Upwards swipe increases volume
+
+    if (!self.isSwipingVolume) {
+        if (fabs(deltaY) >= 5.0f) {
+            self.isSwipingVolume = YES;
+            // Cancel hold timer since user is actively swiping volume
+            [self.holdTimer invalidate];
+            self.holdTimer = nil;
+        }
+    }
+
+    if (self.isSwipingVolume) {
+        // Swiping changes volume only while actively swiping; bar position stays fixed
+        float newVol = self.touchDownVolume + (float)(deltaY / self.bounds.size.height);
+        newVol = fmaxf(0.0f, fminf(1.0f, newVol));
+        [self setSystemVolume:newVol];
     }
 }
 
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    return YES;
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesEnded:touches withEvent:event];
+
+    [self.holdTimer invalidate];
+    self.holdTimer = nil;
+
+    if (self.isDraggingBar) {
+        self.isDraggingBar = NO;
+        [UIView animateWithDuration:0.2 animations:^{
+            self.transform = CGAffineTransformIdentity;
+            self.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.25f].CGColor;
+        }];
+    }
+
+    self.isSwipingVolume = NO;
+    [self revealAndResetTimer];
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesCancelled:touches withEvent:event];
+
+    [self.holdTimer invalidate];
+    self.holdTimer = nil;
+
+    if (self.isDraggingBar) {
+        self.isDraggingBar = NO;
+        [UIView animateWithDuration:0.2 animations:^{
+            self.transform = CGAffineTransformIdentity;
+            self.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.25f].CGColor;
+        }];
+    }
+
+    self.isSwipingVolume = NO;
+    [self revealAndResetTimer];
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
