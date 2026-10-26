@@ -341,6 +341,34 @@ def test_file_integrity():
     assert "-framework CoreGraphics" in bsh
     assert "-framework QuartzCore" in bsh
 
+    # Wi-Fi Spoofer validation
+    with open(f"{base_dir}/InstagramWifiSpoofer.h", "r", encoding="utf-8") as f:
+        h_wifi = f.read()
+    with open(f"{base_dir}/InstagramWifiSpoofer.m", "r", encoding="utf-8") as f:
+        m_wifi = f.read()
+
+    assert "InstagramWifiSpoofer_Init" in h_wifi
+    assert "InstagramWifiSpoofer_IsActive" in h_wifi
+    assert "InstagramWifiSpoofer_Init" in m_wifi
+    assert "InstagramWifiSpoofer_IsActive" in m_wifi
+    assert "My_SCNetworkReachabilityGetFlags" in m_wifi
+    assert "My_getifaddrs" in m_wifi
+    assert "My_nw_path_uses_interface_type" in m_wifi
+    assert "My_nw_path_is_expensive" in m_wifi
+    assert "My_nw_path_is_constrained" in m_wifi
+    assert "InstagramWifiSpoofer.m" in mk
+    assert "SystemConfiguration" in mk
+    assert "Network" in mk
+    assert "InstagramWifiSpoofer.m" in bsh
+    assert "-framework SystemConfiguration" in bsh
+    assert "-framework Network" in bsh
+
+    # Check brackets in InstagramWifiSpoofer.m
+    for open_ch, close_ch, name in [('{', '}', 'Curly Braces'), ('(', ')', 'Parentheses'), ('[', ']', 'Square Brackets')]:
+        c_open = m_wifi.count(open_ch)
+        c_close = m_wifi.count(close_ch)
+        assert c_open == c_close, f"Unbalanced {name} in InstagramWifiSpoofer.m: {c_open} open vs {c_close} close!"
+
     print("   -> PASS: All headers, build files, and implementations are fully synchronized.\n")
 
 if __name__ == "__main__":

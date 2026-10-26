@@ -32,6 +32,7 @@
 #import <fcntl.h>
 #import <time.h>
 #import "InstagramReverb.h"
+#import "InstagramWifiSpoofer.h"
 #import "fishhook.h"
 
 #ifdef __LP64__
@@ -124,13 +125,13 @@ static void SignalCrashHandler(int sig, siginfo_t *info, void *context) {
 }
 
 static void UncaughtExceptionHandler(NSException *exception) {
-    IGLog("[CRASH] Uncaught NSException: %s Reason: %s",
+    // IGLog("[CRASH] Uncaught NSException: %s Reason: %s",
           [exception.name UTF8String] ?: "Unknown",
           [exception.reason UTF8String] ?: "None");
     NSArray *stack = [exception callStackSymbols];
-    for (NSString *frame in stack) {
-        IGLog("  %s", [frame UTF8String]);
-    }
+    // for (NSString *frame in stack) {
+    //     IGLog("  %s", [frame UTF8String]);
+    // }
 }
 
 // ============================================================================
@@ -526,9 +527,9 @@ static OSStatus MyAudioQueueNewOutput(
         }
         if (isFNF) {
             RegisterFNFAudioQueue(aq);
-            IGLog("[AudioQueue] Registered FNF AudioQueue %p (handled by FNF tap)", aq);
+            // IGLog("[AudioQueue] Registered FNF AudioQueue %p (handled by FNF tap)", aq);
         } else {
-            IGLog("[AudioQueue] Registered Standard AudioQueue %p (handled by CoreAudio tap)", aq);
+            // IGLog("[AudioQueue] Registered Standard AudioQueue %p (handled by CoreAudio tap)", aq);
         }
     }
     return err;
@@ -607,8 +608,8 @@ static void EnsureAudioQueueTapped(AudioQueueRef inAQ) {
         &tap
     );
 
-    IGLog("[AudioQueue] AudioQueueProcessingTapNew on AQ=%p -> err=%d, tap=%p, maxFrames=%u, rate=%.1f, ch=%u",
-          inAQ, (int)err, tap, (unsigned int)maxFrames, processingFormat.mSampleRate, (unsigned int)processingFormat.mChannelsPerFrame);
+    // IGLog("[AudioQueue] AudioQueueProcessingTapNew on AQ=%p -> err=%d, tap=%p, maxFrames=%u, rate=%.1f, ch=%u",
+    //       inAQ, (int)err, tap, (unsigned int)maxFrames, processingFormat.mSampleRate, (unsigned int)processingFormat.mChannelsPerFrame);
 
     if (err == noErr && tap != NULL) {
         pthread_mutex_lock(&g_aqMutex);
@@ -629,7 +630,7 @@ static OSStatus MyAudioQueueStart(AudioQueueRef inAQ, const AudioTimeStamp *inSt
     static uint32_t s_aqStartCount = 0;
     if (s_aqStartCount < 20) {
         s_aqStartCount++;
-        IGLog("[Hook] AudioQueueStart [#%u]: AQ=%p isFNF=%d", s_aqStartCount, inAQ, IsFNFAudioQueue(inAQ));
+        // IGLog("[Hook] AudioQueueStart [#%u]: AQ=%p isFNF=%d", s_aqStartCount, inAQ, IsFNFAudioQueue(inAQ));
     }
 
     if (inAQ && !IsFNFAudioQueue(inAQ)) {
@@ -703,7 +704,7 @@ static void InitFNFObjCSwizzling(void) {
         if (mTap) {
             orig_FNF_tapCallback = (void (*)(id, SEL, AudioQueueProcessingTapRef, UInt32, AudioBufferList *, UInt32))method_getImplementation(mTap);
             method_setImplementation(mTap, (IMP)swizzled_FNF_tapCallback);
-            IGLog("[Swizzle] Hooked FNFCoreAudioWrapper audioQueueConverterProcessingTapCallback!");
+            // IGLog("[Swizzle] Hooked FNFCoreAudioWrapper audioQueueConverterProcessingTapCallback!");
         }
 
         SEL selCreate = sel_registerName("_createAudioQueue");
@@ -711,7 +712,7 @@ static void InitFNFObjCSwizzling(void) {
         if (mCreate) {
             orig_FNF_createAudioQueue = (void (*)(id, SEL))method_getImplementation(mCreate);
             method_setImplementation(mCreate, (IMP)swizzled_FNF_createAudioQueue);
-            IGLog("[Swizzle] Hooked FNFCoreAudioWrapper _createAudioQueue!");
+            // IGLog("[Swizzle] Hooked FNFCoreAudioWrapper _createAudioQueue!");
         }
 
         SEL selRemove = sel_registerName("_removeAudioQueue");
@@ -719,7 +720,7 @@ static void InitFNFObjCSwizzling(void) {
         if (mRemove) {
             orig_FNF_removeAudioQueue = (void (*)(id, SEL))method_getImplementation(mRemove);
             method_setImplementation(mRemove, (IMP)swizzled_FNF_removeAudioQueue);
-            IGLog("[Swizzle] Hooked FNFCoreAudioWrapper _removeAudioQueue!");
+            // IGLog("[Swizzle] Hooked FNFCoreAudioWrapper _removeAudioQueue!");
         }
     }
 }
@@ -777,7 +778,7 @@ static void AttachAudioMixToPlayerItem(AVPlayerItem *item) {
         audioMix.inputParameters = inputParams;
         item.audioMix = audioMix;
         CFRelease(tap);
-        IGLog("[AVPlayerItem] Successfully attached MTAudioProcessingTap audioMix to %p", item);
+        // IGLog("[AVPlayerItem] Successfully attached MTAudioProcessingTap audioMix to %p", item);
     }
 }
 
@@ -807,7 +808,7 @@ static void InitAVPlayerItemSwizzling(void) {
         if (mAsset) {
             orig_AVPlayerItem_initWithAsset = (id (*)(id, SEL, AVAsset *, NSArray *))method_getImplementation(mAsset);
             method_setImplementation(mAsset, (IMP)swizzled_AVPlayerItem_initWithAsset);
-            IGLog("[Swizzle] Hooked AVPlayerItem initWithAsset:automaticallyLoadedAssetKeys:!");
+            // IGLog("[Swizzle] Hooked AVPlayerItem initWithAsset:automaticallyLoadedAssetKeys:!");
         }
 
         SEL selURL = @selector(initWithURL:);
@@ -815,7 +816,7 @@ static void InitAVPlayerItemSwizzling(void) {
         if (mURL) {
             orig_AVPlayerItem_initWithURL = (id (*)(id, SEL, NSURL *))method_getImplementation(mURL);
             method_setImplementation(mURL, (IMP)swizzled_AVPlayerItem_initWithURL);
-            IGLog("[Swizzle] Hooked AVPlayerItem initWithURL:!");
+            // IGLog("[Swizzle] Hooked AVPlayerItem initWithURL:!");
         }
     }
 }
@@ -892,7 +893,7 @@ static OSStatus MyAudioUnitSetProperty(AudioUnit inUnit,
                 AURenderCallbackStruct newStruct;
                 newStruct.inputProc = WrappedRenderCallback;
                 newStruct.inputProcRefCon = &sWrappers[idx];
-                IGLog("[Hook] AudioUnitSetProperty: Hooked AURenderCallback on unit %p (idx=%d)", inUnit, idx);
+                // IGLog("[Hook] AudioUnitSetProperty: Hooked AURenderCallback on unit %p (idx=%d)", inUnit, idx);
                 if (real_AudioUnitSetProperty) {
                     return real_AudioUnitSetProperty(inUnit, inID, inScope, inElement, &newStruct, sizeof(newStruct));
                 }
@@ -1027,7 +1028,7 @@ static void PatchGOTPointersInAllImages(void *target_func, void *replacement_fun
                                     kern_return_t kr = vm_protect(mach_task_self(), page, sizeof(uintptr_t), false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
                                     if (kr == KERN_SUCCESS) {
                                         slots[k] = repl_addr;
-                                        IGLog("[GOT Scanner] Patched %s in %s at %p", symbol_name, sectname, &slots[k]);
+                                        // IGLog("[GOT Scanner] Patched %s in %s at %p", symbol_name, sectname, &slots[k]);
                                     }
                                 }
                             }
@@ -1054,11 +1055,11 @@ static void InstallAllInterceptionHooks(void) {
     real_AudioUnitSetProperty = (OSStatus (*)(AudioUnit, AudioUnitPropertyID, AudioUnitScope, AudioUnitElement, const void *, UInt32))dlsym(audioToolboxHandle ?: RTLD_DEFAULT, "AudioUnitSetProperty");
     real_MTAudioProcessingTapGetSourceAudio = (OSStatus (*)(MTAudioProcessingTapRef, CMItemCount, AudioBufferList *, MTAudioProcessingTapFlags *, CMTimeRange *, CMItemCount *))dlsym(mediaToolboxHandle ?: RTLD_DEFAULT, "MTAudioProcessingTapGetSourceAudio");
 
-    IGLog("[Init] Resolved Real System Functions: AQNew=%p, AQStart=%p, AQDispose=%p, AURender=%p, AUSetProp=%p",
-          real_AudioQueueNewOutput, real_AudioQueueStart, real_AudioQueueDispose, real_AudioUnitRender, real_AudioUnitSetProperty);
+    // IGLog("[Init] Resolved Real System Functions: AQNew=%p, AQStart=%p, AQDispose=%p, AURender=%p, AUSetProp=%p",
+    //       real_AudioQueueNewOutput, real_AudioQueueStart, real_AudioQueueDispose, real_AudioUnitRender, real_AudioUnitSetProperty);
 
     // 2. Direct GOT Scanner (Crucial for FBSharedFramework chained fixups)
-    IGLog("[GOT Scanner] Scanning GOT entries in FBSharedFramework and Instagram...");
+    // IGLog("[GOT Scanner] Scanning GOT entries in FBSharedFramework and Instagram...");
     PatchGOTPointersInAllImages((void *)real_AudioQueueNewOutput, (void *)MyAudioQueueNewOutput, "AudioQueueNewOutput");
     PatchGOTPointersInAllImages((void *)real_AudioQueueStart, (void *)MyAudioQueueStart, "AudioQueueStart");
     PatchGOTPointersInAllImages((void *)real_AudioQueueDispose, (void *)MyAudioQueueDispose, "AudioQueueDispose");
@@ -1166,11 +1167,11 @@ static void InstagramReverbInit(void) {
         g_logFile = fopen(g_logFilePath, "a");
     }
 
-    IGLog("==================================================================");
-    IGLog("InstagramReverb Multi-Tier Engine Initializing... PID: %d, App: %s",
-          getpid(), [[[NSBundle mainBundle] bundleIdentifier] UTF8String] ?: "Unknown");
-    IGLog("Log file: %s", g_logFilePath[0] ? g_logFilePath : "Failed to resolve Documents dir");
-    IGLog("Crash log file: %s", g_crashFilePath[0] ? g_crashFilePath : "Failed to resolve Documents dir");
+    // IGLog("==================================================================");
+    // IGLog("InstagramReverb Multi-Tier Engine Initializing... PID: %d, App: %s",
+    //       getpid(), [[[NSBundle mainBundle] bundleIdentifier] UTF8String] ?: "Unknown");
+    // IGLog("Log file: %s", g_logFilePath[0] ? g_logFilePath : "Failed to resolve Documents dir");
+    // IGLog("Crash log file: %s", g_crashFilePath[0] ? g_crashFilePath : "Failed to resolve Documents dir");
 
     // 3. Initialize DSP state
     memset(&g_dsp, 0, sizeof(ReverbDSP));
@@ -1204,6 +1205,9 @@ static void InstagramReverbInit(void) {
     // 4. Install all interception hooks across all 5 tiers
     InstallAllInterceptionHooks();
 
-    IGLog("InstagramReverb Engine Initialized Successfully!");
-    IGLog("==================================================================");
+    // 5. Initialize Automatic Wi-Fi Spoofing Engine (forces 1080p Reels streaming)
+    InstagramWifiSpoofer_Init();
+
+    // IGLog("InstagramReverb Engine Initialized Successfully!");
+    // IGLog("==================================================================");
 }
