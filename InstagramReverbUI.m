@@ -47,7 +47,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hitView = [super hitTest:point withEvent:event];
-    if (hitView == self || hitView == self.rootViewController.view) {
+    if (!hitView || hitView == self || hitView == self.rootViewController.view) {
         return nil; // Pass touches through to Instagram
     }
     return hitView;
@@ -688,7 +688,6 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 @interface InstagramReverbHUDManager ()
 @property (nonatomic, strong) InstagramReverbOverlayWindow *overlayWindow;
 @property (nonatomic, strong) InstagramReverbFloatingButton *floatingButton;
-@property (nonatomic, strong) UIView *dimBackgroundView;
 @property (nonatomic, strong) InstagramReverbHUDView *hudView;
 @property (nonatomic, assign) BOOL isHUDVisible;
 @end
@@ -807,18 +806,6 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
         CGRect winBounds = container.bounds;
 
-        // Very light dimming (0.15) so background video remains visible
-        if (!self.dimBackgroundView) {
-            self.dimBackgroundView = [[UIView alloc] initWithFrame:winBounds];
-            self.dimBackgroundView.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.15f];
-            self.dimBackgroundView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-
-            UITapGestureRecognizer *tapDim = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(hideHUD)];
-            [self.dimBackgroundView addGestureRecognizer:tapDim];
-        } else {
-            self.dimBackgroundView.frame = winBounds;
-        }
-
         // Compact Half-Screen Mini-Widget Layout:
         // Width ~196pt (strictly half of 393pt screen), docked to the bottom-right corner
         CGFloat screenW = winBounds.size.width;
@@ -840,18 +827,17 @@ static UIButton *CreateTinyStepButton(NSString *title) {
             [self.hudView refreshValues];
         }
 
-        [container addSubview:self.dimBackgroundView];
+        // Add ONLY the HUD view to container. NO full-screen dim background view is added,
+        // ensuring touches outside the HUD pass through completely to Instagram beneath.
         [container addSubview:self.hudView];
         [container bringSubviewToFront:self.hudView];
 
         // Smooth spring animation
-        self.dimBackgroundView.alpha = 0.0f;
         self.hudView.alpha = 0.0f;
         self.hudView.transform = CGAffineTransformMakeScale(0.85f, 0.85f);
         self.isHUDVisible = YES;
 
         [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.85f initialSpringVelocity:0.5f options:UIViewAnimationOptionCurveEaseOut animations:^{
-            self.dimBackgroundView.alpha = 1.0f;
             self.hudView.alpha = 1.0f;
             self.hudView.transform = CGAffineTransformIdentity;
         } completion:nil];
@@ -864,11 +850,9 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         self.isHUDVisible = NO;
 
         [UIView animateWithDuration:0.2 animations:^{
-            self.dimBackgroundView.alpha = 0.0f;
             self.hudView.alpha = 0.0f;
             self.hudView.transform = CGAffineTransformMakeScale(0.85f, 0.85f);
         } completion:^(BOOL finished) {
-            [self.dimBackgroundView removeFromSuperview];
             [self.hudView removeFromSuperview];
         }];
     });
