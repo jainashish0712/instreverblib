@@ -6,6 +6,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <QuartzCore/QuartzCore.h>
 #import <MediaPlayer/MediaPlayer.h>
+#import <AVFoundation/AVFoundation.h>
 #import "InstagramReverbUI.h"
 #import "InstagramReverb.h"
 
@@ -146,6 +147,274 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         self.center = center;
         [pan setTranslation:CGPointMake(0, 0) inView:superview];
     }
+}
+
+@end
+
+// ============================================================================
+// Separate Thin Vertical 70x20px Draggable System Volume Bar
+// ============================================================================
+@interface InstagramReverbVolumeBar : UIView <UIGestureRecognizerDelegate>
+
+@property (nonatomic, strong) UIVisualEffectView *blurView;
+@property (nonatomic, strong) UIView *trackView;
+@property (nonatomic, strong) UIView *fillView;
+@property (nonatomic, strong) MPVolumeView *internalVolumeView;
+@property (nonatomic, strong) NSTimer *inactivityTimer;
+
+@property (nonatomic, strong) UIPanGestureRecognizer *panGesture;
+@property (nonatomic, strong) UILongPressGestureRecognizer *longPressGesture;
+@property (nonatomic, strong) UITapGestureRecognizer *tapGesture;
+
+@property (nonatomic, assign) CGPoint panStartCenter;
+@property (nonatomic, assign) BOOL isRepositioning;
+
+- (float)currentSystemVolume;
+- (void)updateFillForVolume:(float)volume;
+- (void)setSystemVolume:(float)volume;
+- (void)revealAndResetTimer;
+
+@end
+
+@implementation InstagramReverbVolumeBar
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.layer.cornerRadius = 10.0f;
+        self.layer.masksToBounds = YES;
+        self.layer.borderWidth = 0.5f;
+        self.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.25f].CGColor;
+        self.backgroundColor = [UIColor colorWithWhite:0.10f alpha:0.65f];
+
+        UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
+        _blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
+        _blurView.frame = self.bounds;
+        _blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _blurView.userInteractionEnabled = NO;
+        [self addSubview:_blurView];
+
+        _trackView = [[UIView alloc] initWithFrame:self.bounds];
+        _trackView.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.20f];
+        _trackView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _trackView.userInteractionEnabled = NO;
+        [self addSubview:_trackView];
+
+        _fillView = [[UIView alloc] initWithFrame:CGRectMake(0, self.bounds.size.height, self.bounds.size.width, 0)];
+        _fillView.backgroundColor = ACCENT_COLOR;
+        _fillView.userInteractionEnabled = NO;
+        [self addSubview:_fillView];
+
+        // Offscreen MPVolumeView to programmatically set system volume
+        _internalVolumeView = [[MPVolumeView alloc] initWithFrame:CGRectMake(-1000, -1000, 1, 1)];
+        _internalVolumeView.alpha = 0.01f;
+        _internalVolumeView.userInteractionEnabled = NO;
+        [self addSubview:_internalVolumeView];
+
+        // Gestures: Tap to set volume, Pan to slide volume or drag bar, LongPress to reposition
+        _tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
+        _tapGesture.cancelsTouchesInView = NO;
+        [self addGestureRecognizer:_tapGesture];
+
+        _panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        _panGesture.delegate = self;
+        _panGesture.cancelsTouchesInView = NO;
+        [self addGestureRecognizer:_panGesture];
+
+        _longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
+        _longPressGesture.minimumPressDuration = 0.25;
+        _longPressGesture.delegate = self;
+        _longPressGesture.cancelsTouchesInView = NO;
+        [self addGestureRecognizer:_longPressGesture];
+
+        // Observers for system volume changes (hardware buttons, headphones, etc.)
+        @try {
+            [[AVAudioSession sharedInstance] addObserver:self
+                                              forKeyPath:@"outputVolume"
+                                                 options:NSKeyValueObservingOptionNew
+                                                 context:nil];
+        } @catch (NSException *e) {}
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(systemVolumeNotification:)
+                                                     name:@"AVSystemController_SystemVolumeDidChangeNotification"
+                                                   object:nil];
+
+        [self updateFillForVolume:[self currentSystemVolume]];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    @try {
+        [[AVAudioSession sharedInstance] removeObserver:self forKeyPath:@"outputVolume"];
+    } @catch (NSException *e) {}
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_inactivityTimer invalidate];
+}
+
+- (float)currentSystemVolume {
+    return [[AVAudioSession sharedInstance] outputVolume];
+}
+
+- (void)updateFillForVolume:(float)volume {
+    volume = fmaxf(0.0f, fminf(1.0f, volume));
+    CGFloat h = self.bounds.size.height;
+    CGFloat w = self.bounds.size.width;
+    CGFloat fillH = roundf(h * volume);
+    CGFloat fillY = h - fillH;
+    self.fillView.frame = CGRectMake(0, fillY, w, fillH);
+}
+
+- (void)setSystemVolume:(float)volume {
+    volume = fmaxf(0.0f, fminf(1.0f, volume));
+    [self updateFillForVolume:volume];
+
+    for (UIView *sub in self.internalVolumeView.subviews) {
+        if ([sub isKindOfClass:[UISlider class]]) {
+            UISlider *slider = (UISlider *)sub;
+            slider.value = volume;
+            [slider sendActionsForControlEvents:UIControlEventValueChanged];
+            break;
+        }
+    }
+}
+
+- (void)revealAndResetTimer {
+    [self.inactivityTimer invalidate];
+    self.inactivityTimer = nil;
+
+    if (self.alpha < 1.0f) {
+        [UIView animateWithDuration:0.20 animations:^{
+            self.alpha = 1.0f;
+        }];
+    }
+
+    __weak typeof(self) weakSelf = self;
+    self.inactivityTimer = [NSTimer timerWithTimeInterval:2.5
+                                                   target:weakSelf
+                                                 selector:@selector(fadeToTransparent)
+                                                 userInfo:nil
+                                                  repeats:NO];
+    [[NSRunLoop mainRunLoop] addTimer:self.inactivityTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)fadeToTransparent {
+    [UIView animateWithDuration:0.35 animations:^{
+        self.alpha = 0.0f;
+    }];
+}
+
+- (void)handleTap:(UITapGestureRecognizer *)tap {
+    [self revealAndResetTimer];
+    CGPoint pt = [tap locationInView:self];
+    CGFloat ratio = 1.0f - (pt.y / self.bounds.size.height);
+    ratio = fmaxf(0.0f, fminf(1.0f, ratio));
+    [self setSystemVolume:ratio];
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)pan {
+    UIView *superview = self.superview;
+    if (!superview) return;
+
+    [self revealAndResetTimer];
+
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        self.panStartCenter = self.center;
+        CGPoint velocity = [pan velocityInView:self];
+        self.isRepositioning = (fabs(velocity.x) > fabs(velocity.y) && fabs(velocity.x) > 40.0f);
+    }
+
+    if (self.isRepositioning) {
+        CGPoint translation = [pan translationInView:superview];
+        CGPoint newCenter = CGPointMake(self.panStartCenter.x + translation.x,
+                                        self.panStartCenter.y + translation.y);
+
+        CGRect bounds = superview.bounds;
+        CGFloat halfW = self.bounds.size.width / 2.0f;
+        CGFloat halfH = self.bounds.size.height / 2.0f;
+        CGFloat minX = halfW + 4.0f;
+        CGFloat maxX = bounds.size.width - halfW - 4.0f;
+        CGFloat minY = halfH + 40.0f;
+        CGFloat maxY = bounds.size.height - halfH - 20.0f;
+
+        newCenter.x = fmaxf(minX, fminf(maxX, newCenter.x));
+        newCenter.y = fmaxf(minY, fminf(maxY, newCenter.y));
+        self.center = newCenter;
+    } else {
+        CGPoint pt = [pan locationInView:self];
+        CGFloat ratio = 1.0f - (pt.y / self.bounds.size.height);
+        ratio = fmaxf(0.0f, fminf(1.0f, ratio));
+        [self setSystemVolume:ratio];
+    }
+
+    if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
+        self.isRepositioning = NO;
+        [self revealAndResetTimer];
+    }
+}
+
+- (void)handleLongPress:(UILongPressGestureRecognizer *)lp {
+    UIView *superview = self.superview;
+    if (!superview) return;
+
+    [self revealAndResetTimer];
+
+    if (lp.state == UIGestureRecognizerStateBegan) {
+        if (@available(iOS 10.0, *)) {
+            UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+            [feedback impactOccurred];
+        }
+        [UIView animateWithDuration:0.15 animations:^{
+            self.transform = CGAffineTransformMakeScale(1.15f, 1.15f);
+        }];
+    } else if (lp.state == UIGestureRecognizerStateChanged) {
+        CGPoint pt = [lp locationInView:superview];
+        CGRect bounds = superview.bounds;
+        CGFloat halfW = self.bounds.size.width / 2.0f;
+        CGFloat halfH = self.bounds.size.height / 2.0f;
+        CGFloat minX = halfW + 4.0f;
+        CGFloat maxX = bounds.size.width - halfW - 4.0f;
+        CGFloat minY = halfH + 40.0f;
+        CGFloat maxY = bounds.size.height - halfH - 20.0f;
+
+        pt.x = fmaxf(minX, fminf(maxX, pt.x));
+        pt.y = fmaxf(minY, fminf(maxY, pt.y));
+        self.center = pt;
+    } else if (lp.state == UIGestureRecognizerStateEnded || lp.state == UIGestureRecognizerStateCancelled) {
+        [UIView animateWithDuration:0.15 animations:^{
+            self.transform = CGAffineTransformIdentity;
+        }];
+        [self revealAndResetTimer];
+    }
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES;
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
+    if ([keyPath isEqualToString:@"outputVolume"]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            float vol = [[AVAudioSession sharedInstance] outputVolume];
+            [self updateFillForVolume:vol];
+            [self revealAndResetTimer];
+        });
+    } else {
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+    }
+}
+
+- (void)systemVolumeNotification:(NSNotification *)note {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        float vol = [[AVAudioSession sharedInstance] outputVolume];
+        NSDictionary *userInfo = note.userInfo;
+        if (userInfo && userInfo[@"AVSystemController_AudioVolumeNotificationParameter"]) {
+            vol = [userInfo[@"AVSystemController_AudioVolumeNotificationParameter"] floatValue];
+        }
+        [self updateFillForVolume:vol];
+        [self revealAndResetTimer];
+    });
 }
 
 @end
@@ -688,6 +957,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 @interface InstagramReverbHUDManager ()
 @property (nonatomic, strong) InstagramReverbOverlayWindow *overlayWindow;
 @property (nonatomic, strong) InstagramReverbFloatingButton *floatingButton;
+@property (nonatomic, strong) InstagramReverbVolumeBar *volumeBar;
 @property (nonatomic, strong) InstagramReverbHUDView *hudView;
 @property (nonatomic, assign) BOOL isHUDVisible;
 @end
@@ -776,6 +1046,21 @@ static UIButton *CreateTinyStepButton(NSString *title) {
             [container bringSubviewToFront:self.floatingButton];
         }
 
+        // Separate Thin Vertical 70x20px Draggable System Volume Bar
+        if (!self.volumeBar) {
+            CGFloat barW = 20.0f;
+            CGFloat barH = 70.0f;
+            CGFloat initialX = 12.0f;
+            CGFloat initialY = 240.0f;
+            self.volumeBar = [[InstagramReverbVolumeBar alloc] initWithFrame:CGRectMake(initialX, initialY, barW, barH)];
+            [container addSubview:self.volumeBar];
+            [self.volumeBar updateFillForVolume:[self.volumeBar currentSystemVolume]];
+            [self.volumeBar revealAndResetTimer];
+        } else if (!self.volumeBar.superview) {
+            [container addSubview:self.volumeBar];
+            [self.volumeBar revealAndResetTimer];
+        }
+
         static BOOL sGestureAdded = NO;
         if (!sGestureAdded) {
             UITapGestureRecognizer *twoFingerTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleHUD)];
@@ -789,6 +1074,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 }
 
 - (void)toggleHUD {
+    [self.volumeBar revealAndResetTimer];
     if (self.isHUDVisible) {
         [self hideHUD];
     } else {
@@ -800,6 +1086,8 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self.isHUDVisible) return;
         if (!self.overlayWindow) [self startOverlay];
+
+        [self.volumeBar revealAndResetTimer];
 
         UIView *container = self.overlayWindow.rootViewController.view;
         if (!container) return;
