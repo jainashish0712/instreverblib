@@ -29,12 +29,13 @@ def verify_volume_bar():
     assert "CGRectMake(initialX, initialY, barW, barH)" in code
     print("   [2/6] PASS: Exact 70x20px dimensions (width 20pt, height 70pt) and 10pt pill radius locked.")
 
-    # 3. Verify Inactivity Timer (2.5 Seconds) and RunLoop Mode
+    # 3. Verify Inactivity Timer (2.5 Seconds), RunLoop Mode & Min 5% Opacity
     assert "[NSTimer timerWithTimeInterval:2.5" in code
     assert "addTimer:self.inactivityTimer forMode:NSRunLoopCommonModes" in code
     assert "- (void)fadeToTransparent" in code
-    assert "self.alpha = 0.0f;" in code
-    print("   [3/6] PASS: Inactivity timer strictly set to 2.5 seconds with NSRunLoopCommonModes (scroll-proof).")
+    assert "self.alpha = 0.05f;" in code, "Must retain 5% min alpha when inactive!"
+    assert "- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event" in code
+    print("   [3/6] PASS: Inactivity timer (2.5s) fades to min 5% opacity (self.alpha = 0.05f) so it stays visible and touchable.")
 
     # 4. Verify System Volume Reading & Programmatic Setting
     assert "[[AVAudioSession sharedInstance] outputVolume]" in code

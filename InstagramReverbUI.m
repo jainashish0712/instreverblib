@@ -301,8 +301,13 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
 - (void)fadeToTransparent {
     [UIView animateWithDuration:0.35 animations:^{
-        self.alpha = 0.0f;
+        self.alpha = 0.05f; // Keep min 5% opacity so it remains visible and directly touchable
     }];
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesBegan:touches withEvent:event];
+    [self revealAndResetTimer];
 }
 
 - (void)handleTap:(UITapGestureRecognizer *)tap {
