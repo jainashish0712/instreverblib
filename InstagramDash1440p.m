@@ -744,13 +744,25 @@ static void Hook_Playlist_UpdateDefaultRepresentationForTrack(id self, SEL _cmd,
 
 // 4. FNFDashVideoPlayerMetadata Hooks (Force 1440x2560 Viewport & Screen Dimensions)
 static CGSize (*orig_meta_size)(id self, SEL _cmd) = NULL;
-static CGSize (*orig_meta_screenSize)(id self, SEL _cmd) = NULL;
-static CGSize (*orig_meta_viewPortSize)(id self, SEL _cmd) = NULL;
-
 static CGSize Hook_Return1440pSize(id self, SEL _cmd) {
-    if (!InstagramDash1440p_IsEnabled()) {
-        if (orig_meta_viewPortSize) return orig_meta_viewPortSize(self, _cmd);
-        if (orig_meta_size) return orig_meta_size(self, _cmd);
+    if (!InstagramDash1440p_IsEnabled() && orig_meta_size) {
+        return orig_meta_size(self, _cmd);
+    }
+    return CGSizeMake(1440.0f, 2560.0f);
+}
+
+static CGSize (*orig_meta_screenSize)(id self, SEL _cmd) = NULL;
+static CGSize Hook_Return1440pScreenSize(id self, SEL _cmd) {
+    if (!InstagramDash1440p_IsEnabled() && orig_meta_screenSize) {
+        return orig_meta_screenSize(self, _cmd);
+    }
+    return CGSizeMake(1440.0f, 2560.0f);
+}
+
+static CGSize (*orig_meta_viewPortSize)(id self, SEL _cmd) = NULL;
+static CGSize Hook_Return1440pViewPortSize(id self, SEL _cmd) {
+    if (!InstagramDash1440p_IsEnabled() && orig_meta_viewPortSize) {
+        return orig_meta_viewPortSize(self, _cmd);
     }
     return CGSizeMake(1440.0f, 2560.0f);
 }
@@ -843,8 +855,8 @@ static void SwizzleDashClasses(void) {
     Class metaCls = objc_getClass("FNFDashVideoPlayerMetadata");
     if (metaCls) {
         SwizzleMethod(metaCls, sel_registerName("size"), Hook_Return1440pSize, &orig_meta_size);
-        SwizzleMethod(metaCls, sel_registerName("screenSize"), Hook_Return1440pSize, &orig_meta_screenSize);
-        SwizzleMethod(metaCls, sel_registerName("viewPortSize"), Hook_Return1440pSize, &orig_meta_viewPortSize);
+        SwizzleMethod(metaCls, sel_registerName("screenSize"), Hook_Return1440pScreenSize, &orig_meta_screenSize);
+        SwizzleMethod(metaCls, sel_registerName("viewPortSize"), Hook_Return1440pViewPortSize, &orig_meta_viewPortSize);
         SwizzleMethod(metaCls, sel_registerName("ignoreAvoidOnCell"), Hook_ReturnYES, NULL);
         DashLogToFile(@"[Swizzle] FNFDashVideoPlayerMetadata swizzled successfully");
     } else {
