@@ -25,53 +25,10 @@ static NSString *g_currentRepresentationId = @"ready";
 static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ============================================================================
-// Sandboxed Multi-Threaded File Logging (Documents/Instagram1440p.log)
+// Zero-Overhead Logging Stub (Disabled for Stutter-Free 1440p Playback)
 // ============================================================================
 
-static char g_docLogPath[1024] = {0};
-static pthread_mutex_t g_logMutex = PTHREAD_MUTEX_INITIALIZER;
-
-static void ResolveLogPath(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        NSString *docDir = paths.firstObject ?: @"/tmp";
-        snprintf(g_docLogPath, sizeof(g_docLogPath), "%s/Instagram1440p.log", [docDir UTF8String]);
-    });
-}
-
-static void DashLog(NSString *format, ...) {
-    if (!format) return;
-    ResolveLogPath();
-
-    va_list args;
-    va_start(args, format);
-    NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-
-    NSLog(@"[InstagramDash1440p] %@", msg);
-
-    time_t rawtime;
-    struct tm timeinfo;
-    char timeBuf[32];
-    time(&rawtime);
-    localtime_r(&rawtime, &timeinfo);
-    strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &timeinfo);
-
-    NSString *line = [NSString stringWithFormat:@"[%s] [InstagramDash1440p] %@\n", timeBuf, msg];
-    const char *utf8 = [line UTF8String];
-    size_t len = strlen(utf8);
-
-    pthread_mutex_lock(&g_logMutex);
-    if (g_docLogPath[0] != '\0') {
-        int fd = open(g_docLogPath, O_WRONLY | O_CREAT | O_APPEND, 0666);
-        if (fd >= 0) {
-            write(fd, utf8, len);
-            close(fd);
-        }
-    }
-    pthread_mutex_unlock(&g_logMutex);
-}
+#define DashLog(...) do {} while(0)
 
 // ============================================================================
 // Public Control & Telemetry Interfaces
@@ -296,7 +253,6 @@ static void UpdateActiveRepresentation(id rep, BOOL isPrefetch) {
     uint64_t pixels = (uint64_t)(sz.width * sz.height);
     NSString *repId = GetRepresentationId(actual) ?: @"unknown";
     NSString *encodingTag = GetRepresentationEncodingTag(actual);
-    uint64_t bw = GetRepresentationBitrate(actual);
 
     BOOL is1440 = (minDim > 1080.0f || maxDim > 1920.0f || pixels > 2200000ULL ||
                    (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])) ||
@@ -408,12 +364,6 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
 
     // Strict hierarchy: 1440p -> 1080p -> Max available
     id chosen = rep1440p ?: rep1080p ?: repHighest ?: representations.firstObject;
-    if (chosen) {
-        NSString *chosenId = GetRepresentationId(chosen);
-        CGSize chosenSz = GetRepresentationPixelDimensions(chosen);
-        uint64_t chosenBw = GetRepresentationBitrate(chosen);
-        DashLog(@"[Quality Selector] -> Target chosen: %@ (%.0fx%.0f, %llu bps)", chosenId, chosenSz.width, chosenSz.height, chosenBw);
-    }
     return chosen;
 }
 
@@ -422,20 +372,7 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
 // ============================================================================
 
 static void LogClassMethods(Class cls) {
-    if (!cls) return;
-    unsigned int count = 0;
-    Method *methods = class_copyMethodList(cls, &count);
-    DashLog(@"--- Methods for %s (%u methods) ---", class_getName(cls), count);
-    for (unsigned int i = 0; i < count; i++) {
-        SEL sel = method_getName(methods[i]);
-        const char *name = sel_getName(sel);
-        if (strcasestr(name, "quality") || strcasestr(name, "select") ||
-            strcasestr(name, "representation") || strcasestr(name, "track") ||
-            strcasestr(name, "prune") || strcasestr(name, "bandwidth")) {
-            DashLog(@"  -[%s %s]", class_getName(cls), name);
-        }
-    }
-    if (methods) free(methods);
+    (void)cls;
 }
 
 static BOOL SafeSwizzleMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
