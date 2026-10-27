@@ -386,8 +386,8 @@ def test_file_integrity():
     assert "InstagramDash1440p_GetCurrentFilename" in m_dash
     assert "InstagramDash1440pModal" in m_ui
     assert "SelectHighestRepresentation" in m_dash
-    assert "Hook_ABRPlayerSize_SelectQualityFromReps" in m_dash
     assert "Hook_ABR_SelectQualityFromReps" in m_dash
+    assert "Hook_ABR_SelectQualityFetchSizes" in m_dash
     assert "Hook_Playlist_DefaultRepresentationForTrack" in m_dash
     assert "Hook_Return1440pSize" in m_dash
     assert "Hook_PruneQualitiesNoOp" in m_dash
