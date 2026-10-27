@@ -438,6 +438,10 @@ static void UpdateRepresentationInfo(id rep) {
 
     BOOL changed = NO;
     pthread_mutex_lock(&g_stateMutex);
+    if (g_isActual1440p && !is1440p && [g_currentFdashFilename isEqualToString:fdashName]) {
+        pthread_mutex_unlock(&g_stateMutex);
+        return;
+    }
     if (![g_currentQuality isEqualToString:quality] ||
         ![g_currentFdashFilename isEqualToString:fdashName] ||
         g_isActual1440p != is1440p) {
@@ -519,7 +523,9 @@ static id SelectHighestRepresentation(NSArray *representations) {
 
     id chosen = rep1440p ?: repHighest ?: representations.firstObject;
     if (chosen && !IsAudioRepresentation(chosen)) {
-        UpdateRepresentationInfo(chosen);
+        if (rep1440p != nil) {
+            UpdateRepresentationInfo(chosen);
+        }
     }
     return chosen;
 }
@@ -567,6 +573,27 @@ static NSArray * Hook_PruneQualitiesNoOp(id self, SEL _cmd, NSArray *qualities) 
 
 // 2. FNFDashABRQualitySelector Hook
 // Forces selection of 1440p/highest representation in ABR quality selector
+struct CxxVectorInt {
+    int *begin;
+    int *end;
+    int *cap;
+};
+
+static id (*orig_ABR_selectQualitySeqIndices)(id self, SEL _cmd, NSArray *representations, struct CxxVectorInt seqIndices, double bandwidth) = NULL;
+
+static id Hook_ABR_SelectQualitySeqIndices(id self, SEL _cmd, NSArray *representations, struct CxxVectorInt seqIndices, double bandwidth) {
+    if (InstagramDash1440p_IsEnabled() && representations && [representations isKindOfClass:[NSArray class]] && representations.count > 0) {
+        id chosen = SelectHighestRepresentation(representations);
+        if (chosen) {
+            return chosen;
+        }
+    }
+    if (orig_ABR_selectQualitySeqIndices) {
+        return orig_ABR_selectQualitySeqIndices(self, _cmd, representations, seqIndices, bandwidth);
+    }
+    return representations.firstObject;
+}
+
 static id (*orig_ABR_selectQualityWithBw)(id self, SEL _cmd, NSArray *reps, double bw) = NULL;
 
 static id Hook_ABR_SelectQualityFromReps(id self, SEL _cmd, NSArray *representations, double bandwidth) {
@@ -608,6 +635,35 @@ static BOOL Hook_ReturnYES(id self, SEL _cmd) {
     return YES;
 }
 
+// 2b. IGFNFSelectedQualityProvider Hooks (Active Player Quality Tracking)
+static void (*orig_qualityProvider_videoQualitySelected)(id self, SEL _cmd, id rep, id meta, NSInteger track) = NULL;
+
+static void Hook_QualityProvider_VideoQualitySelected(id self, SEL _cmd, id rep, id meta, NSInteger track) {
+    if (track == 1 && rep && !IsAudioRepresentation(rep)) {
+        BOOL isIntentional = YES;
+        if (meta && [meta respondsToSelector:@selector(isIntentional)]) {
+            isIntentional = ((BOOL (*)(id, SEL))objc_msgSend)(meta, @selector(isIntentional));
+        }
+        if (isIntentional) {
+            UpdateRepresentationInfo(rep);
+        }
+    }
+    if (orig_qualityProvider_videoQualitySelected) {
+        orig_qualityProvider_videoQualitySelected(self, _cmd, rep, meta, track);
+    }
+}
+
+static void (*orig_qualityProvider_setVideoRep)(id self, SEL _cmd, id rep) = NULL;
+
+static void Hook_QualityProvider_SetVideoRep(id self, SEL _cmd, id rep) {
+    if (rep && !IsAudioRepresentation(rep)) {
+        UpdateRepresentationInfo(rep);
+    }
+    if (orig_qualityProvider_setVideoRep) {
+        orig_qualityProvider_setVideoRep(self, _cmd, rep);
+    }
+}
+
 // 3. FNFDashPlaylist Hooks (Stateless, Zero Associated Objects)
 static NSArray * (*orig_playlist_representationsForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
 
@@ -625,8 +681,13 @@ static NSArray * Hook_Playlist_RepresentationsForTrack(id self, SEL _cmd, NSInte
 static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
 
 static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
-    if (track == 1 && InstagramDash1440p_IsEnabled() && orig_playlist_representationsForTrack) {
-        NSArray *reps = orig_playlist_representationsForTrack(self, @selector(representationsForTrack:), 1);
+    if (track == 1 && InstagramDash1440p_IsEnabled()) {
+        NSArray *reps = nil;
+        if (orig_playlist_representationsForTrack) {
+            reps = orig_playlist_representationsForTrack(self, @selector(representationsForTrack:), 1);
+        } else if ([self respondsToSelector:@selector(representationsForTrack:)]) {
+            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), 1);
+        }
         if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
             id highest = SelectHighestRepresentation(reps);
             if (highest) {
@@ -706,6 +767,8 @@ static void SwizzleDashClasses(void) {
     // 2. Select Highest 1440p Representation in FNFDashABRQualitySelector
     Class abrCls = objc_getClass("FNFDashABRQualitySelector");
     if (abrCls) {
+        SwizzleMethod(abrCls, sel_registerName("_selectQualityFromRepresentations:sequenceIndices:withAvailableBandwidth:"),
+                      Hook_ABR_SelectQualitySeqIndices, &orig_ABR_selectQualitySeqIndices);
         SwizzleMethod(abrCls, sel_registerName("_selectQualityFromRepresentations:withAvailableBandwidth:"),
                       Hook_ABR_SelectQualityFromReps, &orig_ABR_selectQualityWithBw);
         SwizzleMethod(abrCls, sel_registerName("_shouldAvoidOnABR:isIntentional:"),
@@ -713,6 +776,18 @@ static void SwizzleDashClasses(void) {
         DashLogToFile(@"[Swizzle] FNFDashABRQualitySelector swizzled successfully");
     } else {
         DashLogToFile(@"[Swizzle] FNFDashABRQualitySelector not loaded yet");
+    }
+
+    // 2b. Track Active Video Representations in IGFNFSelectedQualityProvider
+    Class qualityProviderCls = objc_getClass("IGFNFSelectedQualityProvider");
+    if (qualityProviderCls) {
+        SwizzleMethod(qualityProviderCls, sel_registerName("videoQualitySelected:playerMetadata:trackType:"),
+                      Hook_QualityProvider_VideoQualitySelected, &orig_qualityProvider_videoQualitySelected);
+        SwizzleMethod(qualityProviderCls, sel_registerName("setVideoSelectedQualityRepresentation:"),
+                      Hook_QualityProvider_SetVideoRep, &orig_qualityProvider_setVideoRep);
+        DashLogToFile(@"[Swizzle] IGFNFSelectedQualityProvider swizzled successfully");
+    } else {
+        DashLogToFile(@"[Swizzle] IGFNFSelectedQualityProvider not loaded yet");
     }
 
     // 3. Force 1440p Default Video Representation in FNFDashPlaylist
