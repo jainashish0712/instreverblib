@@ -126,13 +126,35 @@ static void SignalCrashHandler(int sig, siginfo_t *info, void *context) {
 }
 
 static void UncaughtExceptionHandler(NSException *exception) {
-    // IGLog("[CRASH] Uncaught NSException: %s Reason: %s",
-    //       [exception.name UTF8String] ?: "Unknown",
-    //       [exception.reason UTF8String] ?: "None");
-    NSArray *stack = [exception callStackSymbols];
-    // for (NSString *frame in stack) {
-    //     IGLog("  %s", [frame UTF8String]);
-    // }
+    int fd = open(g_crashFilePath[0] ? g_crashFilePath : "/tmp/InstagramReverb_crash.log",
+                  O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        time_t rawtime;
+        time(&rawtime);
+        char header[1024];
+        int hlen = snprintf(header, sizeof(header),
+            "\n==================================================================\n"
+            "FATAL UNCAUGHT EXCEPTION TRAPPED BY INSTAGRAM REVERB\n"
+            "Timestamp: %ld\n"
+            "Exception: %s\n"
+            "Reason: %s\n"
+            "------------------------------------------------------------------\n"
+            "Call Stack Symbols:\n",
+            (long)rawtime,
+            [exception.name UTF8String] ?: "Unknown",
+            [exception.reason UTF8String] ?: "None");
+        write(fd, header, hlen);
+
+        NSArray *stack = [exception callStackSymbols];
+        for (NSString *frame in stack) {
+            char frameBuf[512];
+            int flen = snprintf(frameBuf, sizeof(frameBuf), "  %s\n", [frame UTF8String]);
+            write(fd, frameBuf, flen);
+        }
+        write(fd, "==================================================================\n", 67);
+        fsync(fd);
+        close(fd);
+    }
 }
 
 // ============================================================================
@@ -1155,7 +1177,7 @@ static void InstagramReverbInit(void) {
     sigaction(SIGABRT, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
 
-    // NSSetUncaughtExceptionHandler(&UncaughtExceptionHandler);
+    NSSetUncaughtExceptionHandler(&UncaughtExceptionHandler);
 
     // 2. Initialize Persistent File Logger in Documents/
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
