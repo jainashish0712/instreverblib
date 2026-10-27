@@ -6,36 +6,22 @@
 // so Instagram's Adaptive Bitrate (ABR) player (Sundial/FNF) unconditionally streams Reels
 // and videos in full 1080p high quality without downscaling to 720p/480p on cellular data.
 //
+// Safety:
+// Low-level POSIX and Network.framework kernel socket routing (getifaddrs, nw_path_uses_interface_type)
+// are strictly preserved untouched so cellular IP packets route uninterrupted through the iOS kernel.
+//
 // 100% Automatic: Zero UI, zero toggles, permanently active in background.
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <SystemConfiguration/SystemConfiguration.h>
-#import <ifaddrs.h>
-#import <net/if.h>
-#import <arpa/inet.h>
 #import <dlfcn.h>
 #import <pthread.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <mach-o/dyld.h>
-#import <mach-o/loader.h>
-#import <mach/mach.h>
-#import <mach/vm_map.h>
 #import "fishhook.h"
 #import "InstagramWifiSpoofer.h"
-
-#ifdef __LP64__
-typedef struct mach_header_64 mach_header_t;
-typedef struct segment_command_64 segment_command_t;
-typedef struct section_64 section_t;
-#define LC_SEGMENT_ARCH_DEPENDENT LC_SEGMENT_64
-#else
-typedef struct mach_header mach_header_t;
-typedef struct segment_command segment_command_t;
-typedef struct section section_t;
-#define LC_SEGMENT_ARCH_DEPENDENT LC_SEGMENT
-#endif
 
 // ============================================================================
 // Tier 1: Objective-C Return Stubs (High-Level Wi-Fi & Bandwidth Emulation)
@@ -214,11 +200,10 @@ static void ImageLoadedCallback(const struct mach_header *mh, intptr_t vmaddr_sl
 }
 
 // ============================================================================
-// Tier 2: SystemConfiguration & POSIX Layer C Hooks
+// Tier 2: SystemConfiguration Advisory Reachability C Hook
 // ============================================================================
 
 static Boolean (*orig_SCNetworkReachabilityGetFlags)(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) = NULL;
-static int (*orig_getifaddrs)(struct ifaddrs **ifap) = NULL;
 
 static Boolean My_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) {
     Boolean res = true;
@@ -235,59 +220,17 @@ static Boolean My_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target,
         // 4. Force Reachable (1 << 1)
         *flags |= (SCNetworkReachabilityFlags)kSCNetworkReachabilityFlagsReachable;
     }
-    return true;
-}
-
-static int My_getifaddrs(struct ifaddrs **ifap) {
-    int res = orig_getifaddrs ? orig_getifaddrs(ifap) : -1;
-    if (res == 0 && ifap && *ifap) {
-        for (struct ifaddrs *ifa = *ifap; ifa != NULL; ifa = ifa->ifa_next) {
-            if (ifa->ifa_name && strncmp(ifa->ifa_name, "pdp_ip", 6) == 0) {
-                // Safely alias cellular "pdp_ip" interfaces to Wi-Fi "en0" in-place
-                strncpy(ifa->ifa_name, "en0", 4);
-            }
-        }
-    }
     return res;
 }
 
 // ============================================================================
-// Tier 3: Network.framework Modern Apple Transport Layer C Hooks
+// Tier 3: Network.framework Advisory Path Property C Hooks
+// (Never overrides socket interfaces or routing types)
 // ============================================================================
 
-static int (*orig_nw_interface_get_type)(void *interface) = NULL;
-static bool (*orig_nw_path_uses_interface_type)(void *path, int type) = NULL;
 static bool (*orig_nw_path_is_expensive)(void *path) = NULL;
 static bool (*orig_nw_path_is_constrained)(void *path) = NULL;
 static bool (*orig_nw_path_is_ultra_constrained)(void *path) = NULL;
-static int (*orig_nw_path_get_status)(void *path) = NULL;
-
-static int My_nw_interface_get_type(void *interface) {
-    if (orig_nw_interface_get_type) {
-        int t = orig_nw_interface_get_type(interface);
-        // 2 = nw_interface_type_cellular -> remap to 1 = nw_interface_type_wifi
-        if (t == 2) {
-            return 1;
-        }
-        return t;
-    }
-    return 1;
-}
-
-static bool My_nw_path_uses_interface_type(void *path, int type) {
-    // 1 = nw_interface_type_wifi
-    if (type == 1) {
-        return true;
-    }
-    // 2 = nw_interface_type_cellular
-    if (type == 2) {
-        return false;
-    }
-    if (orig_nw_path_uses_interface_type) {
-        return orig_nw_path_uses_interface_type(path, type);
-    }
-    return false;
-}
 
 static bool My_nw_path_is_expensive(void *path) {
     // Wi-Fi connection is unmetered and never expensive
@@ -303,94 +246,12 @@ static bool My_nw_path_is_ultra_constrained(void *path) {
     return false;
 }
 
-static int My_nw_path_get_status(void *path) {
-    // 1 = nw_path_status_satisfied
-    return 1;
-}
-
-// ============================================================================
-// Targeted GOT Scanner for Chained Fixup Pointers
-// Explicitly ignores InstagramReverb & InstagramWifiSpoofer to prevent recursion
-// ============================================================================
-
-static void PatchWifiGOTPointersInAllImages(void *target_func, void *replacement_func, const char *symbol_name) {
-    if (!target_func || !replacement_func) return;
-
-    uintptr_t target_addr = (uintptr_t)target_func & 0x0000007fffffffffULL;
-    uintptr_t repl_addr = (uintptr_t)replacement_func;
-
-    uint32_t count = _dyld_image_count();
-    for (uint32_t i = 0; i < count; i++) {
-        const struct mach_header *header = _dyld_get_image_header(i);
-        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-        const char *image_name = _dyld_get_image_name(i);
-        if (!header || !image_name) continue;
-
-        // 1. NEVER patch our own dylibs (prevents recursive self-interception)
-        if (strstr(image_name, "InstagramReverb") || strstr(image_name, "InstagramWifiSpoofer")) {
-            continue;
-        }
-
-        // 2. Only target FBSharedFramework, main Instagram executable, and CFNetwork
-        if (!strstr(image_name, "FBSharedFramework") &&
-            !strstr(image_name, "Instagram.app/Instagram") &&
-            !strstr(image_name, "CFNetwork")) {
-            continue;
-        }
-
-        uintptr_t cur = (uintptr_t)header;
-        #ifdef __LP64__
-        cur += sizeof(struct mach_header_64);
-        #else
-        cur += sizeof(struct mach_header);
-        #endif
-
-        for (uint32_t c = 0; c < header->ncmds; c++) {
-            struct segment_command_64 *seg = (struct segment_command_64 *)cur;
-            if (seg->cmd == LC_SEGMENT_64) {
-                const char *segname = seg->segname;
-                if (strcmp(segname, "__DATA_CONST") == 0 ||
-                    strcmp(segname, "__DATA") == 0 ||
-                    strcmp(segname, "__AUTH_CONST") == 0) {
-
-                    struct section_64 *sect = (struct section_64 *)((uintptr_t)seg + sizeof(struct segment_command_64));
-                    for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
-                        const char *sectname = sect->sectname;
-                        if (strcmp(sectname, "__got") == 0 ||
-                            strcmp(sectname, "__auth_got") == 0 ||
-                            strcmp(sectname, "__nl_symbol_ptr") == 0 ||
-                            strcmp(sectname, "__la_symbol_ptr") == 0) {
-
-                            uintptr_t sect_addr = (uintptr_t)slide + sect->addr;
-                            size_t sect_size = (size_t)sect->size;
-                            uintptr_t *slots = (uintptr_t *)sect_addr;
-                            size_t num_slots = sect_size / sizeof(uintptr_t);
-
-                            for (size_t k = 0; k < num_slots; k++) {
-                                uintptr_t val = slots[k] & 0x0000007fffffffffULL;
-                                if (val == target_addr) {
-                                    vm_address_t page = (vm_address_t)&slots[k];
-                                    kern_return_t kr = vm_protect(mach_task_self(), page, sizeof(uintptr_t), false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-                                    if (kr == KERN_SUCCESS) {
-                                        slots[k] = repl_addr;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            cur += seg->cmdsize;
-        }
-    }
-}
-
 // ============================================================================
 // C Function Interception Installation
 // ============================================================================
 
 static void InstallCFunctionHooks(void) {
-    // 1. Resolve real pointers directly from system libraries
+    // 1. Resolve real pointers directly from system frameworks
     void *scHandle = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_NOW | RTLD_GLOBAL);
     if (scHandle) {
         orig_SCNetworkReachabilityGetFlags = (Boolean (*)(SCNetworkReachabilityRef, SCNetworkReachabilityFlags *))dlsym(scHandle, "SCNetworkReachabilityGetFlags");
@@ -399,22 +260,11 @@ static void InstallCFunctionHooks(void) {
         orig_SCNetworkReachabilityGetFlags = (Boolean (*)(SCNetworkReachabilityRef, SCNetworkReachabilityFlags *))dlsym(RTLD_DEFAULT, "SCNetworkReachabilityGetFlags");
     }
 
-    orig_getifaddrs = (int (*)(struct ifaddrs **))dlsym(RTLD_DEFAULT, "getifaddrs");
-
     void *nwHandle = dlopen("/System/Library/Frameworks/Network.framework/Network", RTLD_NOW | RTLD_GLOBAL);
     if (nwHandle) {
-        orig_nw_interface_get_type = (int (*)(void *))dlsym(nwHandle, "nw_interface_get_type");
-        orig_nw_path_uses_interface_type = (bool (*)(void *, int))dlsym(nwHandle, "nw_path_uses_interface_type");
         orig_nw_path_is_expensive = (bool (*)(void *))dlsym(nwHandle, "nw_path_is_expensive");
         orig_nw_path_is_constrained = (bool (*)(void *))dlsym(nwHandle, "nw_path_is_constrained");
         orig_nw_path_is_ultra_constrained = (bool (*)(void *))dlsym(nwHandle, "nw_path_is_ultra_constrained");
-        orig_nw_path_get_status = (int (*)(void *))dlsym(nwHandle, "nw_path_get_status");
-    }
-    if (!orig_nw_interface_get_type) {
-        orig_nw_interface_get_type = (int (*)(void *))dlsym(RTLD_DEFAULT, "nw_interface_get_type");
-    }
-    if (!orig_nw_path_uses_interface_type) {
-        orig_nw_path_uses_interface_type = (bool (*)(void *, int))dlsym(RTLD_DEFAULT, "nw_path_uses_interface_type");
     }
     if (!orig_nw_path_is_expensive) {
         orig_nw_path_is_expensive = (bool (*)(void *))dlsym(RTLD_DEFAULT, "nw_path_is_expensive");
@@ -425,48 +275,15 @@ static void InstallCFunctionHooks(void) {
     if (!orig_nw_path_is_ultra_constrained) {
         orig_nw_path_is_ultra_constrained = (bool (*)(void *))dlsym(RTLD_DEFAULT, "nw_path_is_ultra_constrained");
     }
-    if (!orig_nw_path_get_status) {
-        orig_nw_path_get_status = (int (*)(void *))dlsym(RTLD_DEFAULT, "nw_path_get_status");
-    }
 
-    // 2. Global Symbol Rebinding via fishhook
+    // 2. Safe Dynamic Symbol Rebinding via fishhook
     struct rebinding rebs[] = {
         {"SCNetworkReachabilityGetFlags", (void *)My_SCNetworkReachabilityGetFlags, (void **)&orig_SCNetworkReachabilityGetFlags},
-        {"getifaddrs", (void *)My_getifaddrs, (void **)&orig_getifaddrs},
-        {"nw_interface_get_type", (void *)My_nw_interface_get_type, (void **)&orig_nw_interface_get_type},
-        {"nw_path_uses_interface_type", (void *)My_nw_path_uses_interface_type, (void **)&orig_nw_path_uses_interface_type},
         {"nw_path_is_expensive", (void *)My_nw_path_is_expensive, (void **)&orig_nw_path_is_expensive},
         {"nw_path_is_constrained", (void *)My_nw_path_is_constrained, (void **)&orig_nw_path_is_constrained},
-        {"nw_path_is_ultra_constrained", (void *)My_nw_path_is_ultra_constrained, (void **)&orig_nw_path_is_ultra_constrained},
-        {"nw_path_get_status", (void *)My_nw_path_get_status, (void **)&orig_nw_path_get_status}
+        {"nw_path_is_ultra_constrained", (void *)My_nw_path_is_ultra_constrained, (void **)&orig_nw_path_is_ultra_constrained}
     };
     rebind_symbols(rebs, sizeof(rebs) / sizeof(rebs[0]));
-
-    // 3. Direct GOT Scanner to patch any chained fixup GOT pointers
-    if (orig_SCNetworkReachabilityGetFlags) {
-        PatchWifiGOTPointersInAllImages((void *)orig_SCNetworkReachabilityGetFlags, (void *)My_SCNetworkReachabilityGetFlags, "SCNetworkReachabilityGetFlags");
-    }
-    if (orig_getifaddrs) {
-        PatchWifiGOTPointersInAllImages((void *)orig_getifaddrs, (void *)My_getifaddrs, "getifaddrs");
-    }
-    if (orig_nw_interface_get_type) {
-        PatchWifiGOTPointersInAllImages((void *)orig_nw_interface_get_type, (void *)My_nw_interface_get_type, "nw_interface_get_type");
-    }
-    if (orig_nw_path_uses_interface_type) {
-        PatchWifiGOTPointersInAllImages((void *)orig_nw_path_uses_interface_type, (void *)My_nw_path_uses_interface_type, "nw_path_uses_interface_type");
-    }
-    if (orig_nw_path_is_expensive) {
-        PatchWifiGOTPointersInAllImages((void *)orig_nw_path_is_expensive, (void *)My_nw_path_is_expensive, "nw_path_is_expensive");
-    }
-    if (orig_nw_path_is_constrained) {
-        PatchWifiGOTPointersInAllImages((void *)orig_nw_path_is_constrained, (void *)My_nw_path_is_constrained, "nw_path_is_constrained");
-    }
-    if (orig_nw_path_is_ultra_constrained) {
-        PatchWifiGOTPointersInAllImages((void *)orig_nw_path_is_ultra_constrained, (void *)My_nw_path_is_ultra_constrained, "nw_path_is_ultra_constrained");
-    }
-    if (orig_nw_path_get_status) {
-        PatchWifiGOTPointersInAllImages((void *)orig_nw_path_get_status, (void *)My_nw_path_get_status, "nw_path_get_status");
-    }
 }
 
 // ============================================================================
@@ -480,7 +297,7 @@ void InstagramWifiSpoofer_Init(void) {
         NSLog(@"[InstagramWifiSpoofer] Initializing Automatic Cellular-to-Wi-Fi Spoofing Engine");
         NSLog(@"[InstagramWifiSpoofer] Target: Force 1080p ABR Streaming for Reels and Videos");
 
-        // Tier 2 & Tier 3: Install C function hooks
+        // Tier 2 & Tier 3: Install advisory reachability C function hooks
         InstallCFunctionHooks();
 
         // Tier 1: Objective-C Runtime Swizzles

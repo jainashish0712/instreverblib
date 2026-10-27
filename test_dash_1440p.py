@@ -82,39 +82,41 @@ def test_source_code_hooks_and_classes():
     # Core selector hooks
     required_hooks = [
         "SelectHighestRepresentation",
-        "Hook_SelectQualityFromRepsWithBandwidth",
-        "Hook_SelectQualityFromRepsSeqBandwidth",
-        "Hook_SelectQualityFromRepsFetchSizes",
-        "Hook_SelectQuality",
-        "Hook_SelectQualitySingle",
+        "Hook_ABRPlayerSize_SelectQualityFromReps",
+        "Hook_ABR_SelectQualityFromReps",
+        "Hook_Playlist_DefaultRepresentationForTrack",
         "Hook_PruneQualitiesNoOp",
-        "Hook_PruneRepsNoOp",
         "Hook_Return1440pSize",
-        "Hook_DefaultVideoRepresentation"
+        "Hook_ShouldSkipRepAOC",
+        "Hook_ReturnYES",
+        "Hook_ReturnNO"
     ]
     for h in required_hooks:
         assert h in code, f"Missing hook implementation: {h}"
 
     # Target classes
     target_classes = [
-        "FNFDashDefaultQualitySelector",
-        "FNFDashABRPlayerSizeQualitySelector",
-        "FNFDashABRSizeBasedBweQualitySelector",
-        "FNFDashUserSelectedQualitySelector",
-        "FNFDashMultiRepUserSelectedQualitySelector",
-        "FNFDashMaxQualitySelector",
-        "FNFDashQualityManager",
         "FNFDashPlayerSizePruner",
-        "FNFDashConfig",
+        "FNFDashPlayerQualityPruner",
+        "FNFDashABRPlayerSizeQualitySelector",
+        "FNFDashABRQualitySelector",
+        "FNFDashPlaylist",
         "FNFDashVideoPlayerMetadata",
         "FNFDashPlaylistManager",
-        "IGFNFDashQualityManager"
+        "FNFDashManifestMetadata",
+        "IGFNFSelectedQualityProvider",
+        "FNFDashConfig"
     ]
     for cls in target_classes:
         assert f'"{cls}"' in code, f"Missing target class registration: {cls}"
 
     # Viewport dimensions 1440x2560
     assert "CGSizeMake(1440.0f, 2560.0f)" in code, "Missing 1440x2560 viewport dimension lock"
+
+    # Verify destructive hooks that broke playback are absent
+    assert 'Hook_DefaultVideoRepresentation' not in code, "Hook_DefaultVideoRepresentation must NOT be present!"
+    assert 'Hook_SelectQuality' not in code, "Hook_SelectQuality must NOT be present!"
+    assert 'Hook_ReturnNil' not in code, "playerSizePruner must NOT return nil!"
 
     print("   -> PASS: All target classes, methods, and 1440x2560 viewport overrides verified.")
 
@@ -124,11 +126,10 @@ def test_pruning_bypass_and_aoc():
         code = f.read()
 
     assert 'sel_registerName("pruneQualities:")' in code
-    assert 'sel_registerName("pruneReps:withConfig:")' in code
     assert 'sel_registerName("_shouldSkipRepAOC:isOnWifi:")' in code
-    assert 'sel_registerName("playerSizePruner")' in code
     assert 'sel_registerName("isUserDataSaverModeEnabled")' in code
     assert 'sel_registerName("bandwidthLimitedResolutionsDisabled")' in code
+    assert 'sel_registerName("ignoreAvoidOnCell")' in code
 
     print("   -> PASS: Player size pruning, Wi-Fi AOC, and cellular Data Saver restrictions bypassed.")
 

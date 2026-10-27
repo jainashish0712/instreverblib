@@ -352,10 +352,9 @@ def test_file_integrity():
     assert "InstagramWifiSpoofer_Init" in m_wifi
     assert "InstagramWifiSpoofer_IsActive" in m_wifi
     assert "My_SCNetworkReachabilityGetFlags" in m_wifi
-    assert "My_getifaddrs" in m_wifi
-    assert "My_nw_path_uses_interface_type" in m_wifi
     assert "My_nw_path_is_expensive" in m_wifi
     assert "My_nw_path_is_constrained" in m_wifi
+    assert "My_nw_path_is_ultra_constrained" in m_wifi
     assert "InstagramWifiSpoofer.m" in mk
     assert "SystemConfiguration" in mk
     assert "Network" in mk
@@ -380,8 +379,12 @@ def test_file_integrity():
     assert "InstagramDash1440p_Init" in m_dash
     assert "InstagramDash1440p_IsActive" in m_dash
     assert "SelectHighestRepresentation" in m_dash
-    assert "Hook_SelectQualityFromRepsWithBandwidth" in m_dash
+    assert "Hook_ABRPlayerSize_SelectQualityFromReps" in m_dash
+    assert "Hook_ABR_SelectQualityFromReps" in m_dash
+    assert "Hook_Playlist_DefaultRepresentationForTrack" in m_dash
     assert "Hook_Return1440pSize" in m_dash
+    assert "Hook_PruneQualitiesNoOp" in m_dash
+    assert "Hook_ShouldSkipRepAOC" in m_dash
     assert "InstagramDash1440p.m" in mk
     assert "InstagramDash1440p.m" in bsh
 

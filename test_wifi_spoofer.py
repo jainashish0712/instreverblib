@@ -79,7 +79,9 @@ def test_tier1_objc_swizzling():
     print("   -> PASS: All Tier 1 Objective-C runtime swizzles and return stubs verified.")
 
 def test_tier2_system_reachability_and_interfaces():
-    print("[2/5] Testing Tier 2: SystemConfiguration Flags & POSIX Interface Aliasing...")
+    print("[2/5] Testing Tier 2: SystemConfiguration Flags & Unaltered POSIX Sockets...")
+    with open(os.path.join(BASE_DIR, "InstagramWifiSpoofer.m"), "r", encoding="utf-8") as f:
+        code = f.read()
 
     # Constants from Apple SystemConfiguration
     kSCNetworkReachabilityFlagsTransientConnection   = 1 << 0
@@ -104,56 +106,26 @@ def test_tier2_system_reachability_and_interfaces():
     assert (modified_flags & kSCNetworkReachabilityFlagsConnectionRequired) == 0, "ConnectionRequired must be stripped!"
     assert (modified_flags & kSCNetworkReachabilityFlagsReachable) != 0, "Reachable flag must be set!"
 
-    # Simulate getifaddrs pdp_ip interface renaming
-    class MockIfaddrs:
-        def __init__(self, name):
-            self.ifa_name = name
-
-    interfaces = [MockIfaddrs("lo0"), MockIfaddrs("pdp_ip0"), MockIfaddrs("pdp_ip1"), MockIfaddrs("en0")]
-    for ifa in interfaces:
-        if ifa.ifa_name.startswith("pdp_ip"):
-            ifa.ifa_name = "en0"
-
-    interface_names = [ifa.ifa_name for ifa in interfaces]
-    assert "pdp_ip0" not in interface_names
-    assert "pdp_ip1" not in interface_names
-    assert interface_names.count("en0") == 3
-    print("   -> PASS: Tier 2 SCNetworkReachabilityGetFlags bitwise logic and getifaddrs verified.")
+    # Verify POSIX socket preservation: getifaddrs must NOT be aliased or overridden
+    assert "My_getifaddrs" not in code, "getifaddrs must NOT be hooked to prevent cellular socket bind failures!"
+    print("   -> PASS: Tier 2 SCNetworkReachabilityGetFlags bitwise logic verified; POSIX sockets cleanly preserved.")
 
 def test_tier3_modern_transport_layer():
-    print("[3/5] Testing Tier 3: Network.framework Transport Layer Hooks...")
+    print("[3/5] Testing Tier 3: Network.framework Advisory Flags & Kernel Routing Preservation...")
     with open(os.path.join(BASE_DIR, "InstagramWifiSpoofer.m"), "r", encoding="utf-8") as f:
         code = f.read()
 
-    assert "My_nw_interface_get_type" in code
-    assert "My_nw_path_uses_interface_type" in code
+    # Advisory path property hooks must be present
     assert "My_nw_path_is_expensive" in code
     assert "My_nw_path_is_constrained" in code
     assert "My_nw_path_is_ultra_constrained" in code
-    assert "My_nw_path_get_status" in code
 
-    # Simulate nw_path_uses_interface_type logic:
-    # 1 = wifi, 2 = cellular
-    def mock_nw_path_uses_interface_type(path, type_code):
-        if type_code == 1:
-            return True
-        if type_code == 2:
-            return False
-        return False
+    # Destructive transport hooks must NOT be present
+    assert "My_nw_interface_get_type" not in code, "nw_interface_get_type must NOT be hooked!"
+    assert "My_nw_path_uses_interface_type" not in code, "nw_path_uses_interface_type must NOT be hooked to prevent routing failure!"
+    assert "My_nw_path_get_status" not in code, "nw_path_get_status must NOT be hooked!"
 
-    assert mock_nw_path_uses_interface_type("path", 1) is True, "Wi-Fi interface type must return True"
-    assert mock_nw_path_uses_interface_type("path", 2) is False, "Cellular interface type must return False"
-
-    # Simulate nw_interface_get_type logic:
-    def mock_nw_interface_get_type(orig_type):
-        if orig_type == 2: # cellular
-            return 1 # wifi
-        return orig_type
-
-    assert mock_nw_interface_get_type(2) == 1, "Cellular interface type (2) must be remapped to Wi-Fi (1)"
-    assert mock_nw_interface_get_type(1) == 1, "Wi-Fi interface type (1) must remain Wi-Fi (1)"
-
-    print("   -> PASS: Tier 3 Network.framework hooks and QUIC chunk downloader logic verified.")
+    print("   -> PASS: Tier 3 advisory flags active; zero kernel transport tampering confirmed.")
 
 def test_zero_ui_and_automatic_execution():
     print("[4/5] Testing Zero-UI & 100% Background Automation Constraints...")
