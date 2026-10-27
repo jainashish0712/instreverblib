@@ -5,10 +5,12 @@
 // Unlocks full 1440p (2560x1440) DASH video playback on Wi-Fi and Cellular data by:
 // 1. Overriding FNF player size pruning (reporting 1440x2560 viewport and screen dimensions).
 // 2. Disabling representation pruning in FNFDashPlayerSizePruner & FNFDashPlayerQualityPruner.
-// 3. Ensuring 1440p / maximum bitrate representation selection in FNFDashABRPlayerSizeQualitySelector.
-// 4. Bypassing Avoid-On-Cell (AOC) representation restrictions.
-// 5. Supporting runtime toggle via 20px modal for standard vs 1440p behavior.
-// 6. Accurately extracting server representation info ("fdash-%id") and discriminating true 1440p vs 1080p.
+// 3. Ensuring 1440p / maximum bitrate representation selection across all FNFDash quality selectors.
+// 4. Enabling embedded FFmpeg VP9 decoding sessions (enableFFVP9Decoding, ffvp9EnableFastFlag, ffvp9ThreadCount).
+// 5. Strictly isolating audio representations from video representations so audio tracks never overwrite video modal state.
+// 6. Bypassing Avoid-On-Cell (AOC) representation restrictions and playlist representation disabling.
+// 7. Supporting runtime toggle via 20px modal for standard vs 1440p behavior.
+// 8. Accurately extracting server representation info ("fdash-%id") and discriminating true 1440p vs 1080p.
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -87,6 +89,29 @@ void InstagramDash1440p_SetCurrentFilename(NSString *filename) {
     pthread_mutex_unlock(&g_stateMutex);
 }
 
+// Determines if an FNF representation is an audio track
+static BOOL IsAudioRepresentation(id rep) {
+    if (!rep) return NO;
+    if ([rep respondsToSelector:@selector(isAudio)]) {
+        if (((BOOL (*)(id, SEL))objc_msgSend)(rep, @selector(isAudio))) {
+            return YES;
+        }
+    }
+    if ([rep respondsToSelector:@selector(track)]) {
+        NSInteger tr = ((NSInteger (*)(id, SEL))objc_msgSend)(rep, @selector(track));
+        if (tr == 2) {
+            return YES;
+        }
+    }
+    if ([rep respondsToSelector:@selector(representationId)]) {
+        NSString *repId = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(representationId));
+        if (repId && [repId hasSuffix:@"a"]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 // Extracts pixel dimensions (width x height) from any FNF representation or metadata object
 static CGSize GetRepresentationPixelDimensions(id rep) {
     if (!rep) return CGSizeZero;
@@ -116,6 +141,23 @@ static CGSize GetRepresentationPixelDimensions(id rep) {
         }
     }
     if (sz.width <= 0.0f || sz.height <= 0.0f) {
+        if ([rep respondsToSelector:@selector(trackMetadata)]) {
+            id tmeta = ((id (*)(id, SEL))objc_msgSend)(rep, @selector(trackMetadata));
+            if (tmeta) {
+                CGFloat w = 0, h = 0;
+                if ([tmeta respondsToSelector:@selector(width)]) {
+                    w = (CGFloat)((NSInteger (*)(id, SEL))objc_msgSend)(tmeta, @selector(width));
+                }
+                if ([tmeta respondsToSelector:@selector(height)]) {
+                    h = (CGFloat)((NSInteger (*)(id, SEL))objc_msgSend)(tmeta, @selector(height));
+                }
+                if (w > 0 && h > 0) {
+                    sz = CGSizeMake(w, h);
+                }
+            }
+        }
+    }
+    if (sz.width <= 0.0f || sz.height <= 0.0f) {
         if ([rep respondsToSelector:@selector(metadata)]) {
             id meta = ((id (*)(id, SEL))objc_msgSend)(rep, @selector(metadata));
             if (meta) {
@@ -138,6 +180,10 @@ static CGSize GetRepresentationPixelDimensions(id rep) {
 // Discriminates true 1440p vs 1080p and formats full server filename as "fdash-%id"
 static void UpdateRepresentationInfo(id rep) {
     if (!rep) return;
+    if (IsAudioRepresentation(rep)) {
+        // Audio representations MUST NEVER overwrite video representation state!
+        return;
+    }
 
     NSString *repId = nil;
     if ([rep respondsToSelector:@selector(representationId)]) {
@@ -154,6 +200,10 @@ static void UpdateRepresentationInfo(id rep) {
     CGSize sz = GetRepresentationPixelDimensions(rep);
     BOOL is1440p = (sz.width >= 1440.0f || sz.height >= 2560.0f);
 
+    if (!is1440p && repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"1440"])) {
+        is1440p = YES;
+    }
+
     // Fallback only if pixel dimensions were unavailable from all selectors
     if (!is1440p && sz.width <= 0.0f && sz.height <= 0.0f) {
         NSString *label = nil;
@@ -161,8 +211,6 @@ static void UpdateRepresentationInfo(id rep) {
             label = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(qualityLabel));
         }
         if (label && ([label containsString:@"1440"] || [label localizedCaseInsensitiveContainsString:@"2k"])) {
-            is1440p = YES;
-        } else if (repId && ([repId containsString:@"1440"] || [repId localizedCaseInsensitiveContainsString:@"2k"])) {
             is1440p = YES;
         }
     }
@@ -175,6 +223,8 @@ static void UpdateRepresentationInfo(id rep) {
     if (repId && repId.length > 0) {
         if ([repId hasPrefix:@"fdash-"]) {
             fdashName = repId;
+        } else if ([repId hasPrefix:@"dash-"]) {
+            fdashName = [NSString stringWithFormat:@"f%@", repId];
         } else {
             fdashName = [NSString stringWithFormat:@"fdash-%@", repId];
         }
@@ -214,13 +264,34 @@ static id SelectHighestRepresentation(NSArray *representations) {
         return nil;
     }
 
+    // Check if these are audio representations
+    id first = representations.firstObject;
+    if (IsAudioRepresentation(first)) {
+        // Audio representations: select highest audio bitrate without touching video state
+        id bestAudio = first;
+        uint64_t maxBw = 0;
+        for (id rep in representations) {
+            uint64_t bw = 0;
+            if ([rep respondsToSelector:@selector(bandwidth)]) {
+                bw = (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(bandwidth));
+            } else if ([rep respondsToSelector:@selector(bitrate)]) {
+                bw = (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(bitrate));
+            }
+            if (bw > maxBw) {
+                maxBw = bw;
+                bestAudio = rep;
+            }
+        }
+        return bestAudio;
+    }
+
     id bestRep = nil;
     uint64_t maxPixelCount = 0;
     uint64_t maxBandwidth = 0;
 
     // Pass 1: Rank by true pixel resolution (1440x2560 = 3,686,400 pixels vs 1080x1920 = 2,073,600 pixels)
     for (id rep in representations) {
-        if (!rep) continue;
+        if (!rep || IsAudioRepresentation(rep)) continue;
 
         CGSize sz = GetRepresentationPixelDimensions(rep);
         uint64_t pixels = (uint64_t)(sz.width * sz.height);
@@ -232,9 +303,14 @@ static id SelectHighestRepresentation(NSArray *representations) {
             bw = (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(bitrate));
         }
 
-        // Direct 1440p match (width >= 1440 or height >= 2560)
-        if (sz.width >= 1440.0f || sz.height >= 2560.0f) {
-            DashLog("Locked onto 1440p representation by pixel dimensions: %.0fx%.0f (bandwidth: %llu)", sz.width, sz.height, bw);
+        NSString *repId = nil;
+        if ([rep respondsToSelector:@selector(representationId)]) {
+            repId = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(representationId));
+        }
+
+        // Direct 1440p match (width >= 1440 or height >= 2560 or ID match)
+        if (sz.width >= 1440.0f || sz.height >= 2560.0f || (repId && [repId containsString:@"1539525017490074"])) {
+            DashLog("Locked onto 1440p representation: %@ (%.0fx%.0f, bandwidth: %llu)", repId, sz.width, sz.height, bw);
             UpdateRepresentationInfo(rep);
             return rep;
         }
@@ -254,9 +330,9 @@ static id SelectHighestRepresentation(NSArray *representations) {
         return bestRep;
     }
 
-    // Pass 2: Fallback to highest bandwidth if pixel dimensions were unavailable on all representations
+    // Pass 2: Fallback to highest bandwidth video representation
     for (id rep in representations) {
-        if (!rep) continue;
+        if (!rep || IsAudioRepresentation(rep)) continue;
         uint64_t bw = 0;
         if ([rep respondsToSelector:@selector(bandwidth)]) {
             bw = (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(bandwidth));
@@ -271,7 +347,7 @@ static id SelectHighestRepresentation(NSArray *representations) {
     }
 
     id finalRep = bestRep ?: representations.firstObject;
-    if (finalRep) {
+    if (finalRep && !IsAudioRepresentation(finalRep)) {
         UpdateRepresentationInfo(finalRep);
     }
     return finalRep;
@@ -354,6 +430,21 @@ static BOOL Hook_ReturnNO(id self, SEL _cmd) {
     return NO;
 }
 
+// Thread count for VP9 software decoder (4 cores for smooth 1440p 60fps playback)
+static int Hook_Return4(id self, SEL _cmd) {
+    return 4;
+}
+
+// Thread type for VP9 software decoder (1 = frame threading)
+static int Hook_Return1(id self, SEL _cmd) {
+    return 1;
+}
+
+// NO-OP representation disabling in FNFDashPlaylist
+static void Hook_NoOpRepresentationDisable(id self, SEL _cmd) {
+    // Prevent FNF from disabling or dropping high resolution representations
+}
+
 // Selects highest/1440p representation within FNFDashABRQualitySelector (sequenceIndices variant)
 static id (*orig_ABR_selectQualityFromReps)(id self, SEL _cmd, NSArray *reps, void *seqIndices, double bw) = NULL;
 
@@ -361,13 +452,14 @@ static id Hook_ABR_SelectQualityFromReps(id self, SEL _cmd, NSArray *representat
     if (InstagramDash1440p_IsEnabled()) {
         id chosen = SelectHighestRepresentation(representations);
         if (chosen) {
-            UpdateRepresentationInfo(chosen);
             return chosen;
         }
     }
     if (orig_ABR_selectQualityFromReps) {
         id stdRep = orig_ABR_selectQualityFromReps(self, _cmd, representations, seqIndices, bandwidth);
-        UpdateRepresentationInfo(stdRep);
+        if (stdRep && !IsAudioRepresentation(stdRep)) {
+            UpdateRepresentationInfo(stdRep);
+        }
         return stdRep;
     }
     return representations.firstObject;
@@ -380,13 +472,34 @@ static id Hook_ABR_SelectQualityFetchSizes(id self, SEL _cmd, NSArray *represent
     if (InstagramDash1440p_IsEnabled()) {
         id chosen = SelectHighestRepresentation(representations);
         if (chosen) {
-            UpdateRepresentationInfo(chosen);
             return chosen;
         }
     }
     if (orig_ABR_selectQualityFetchSizes) {
         id stdRep = orig_ABR_selectQualityFetchSizes(self, _cmd, representations, fetchSizes, seqIndexes);
-        UpdateRepresentationInfo(stdRep);
+        if (stdRep && !IsAudioRepresentation(stdRep)) {
+            UpdateRepresentationInfo(stdRep);
+        }
+        return stdRep;
+    }
+    return representations.firstObject;
+}
+
+// Selects highest/1440p representation within FNFDashABRQualitySelector (bandwidth variant)
+static id (*orig_ABR_selectQualityBandwidth)(id self, SEL _cmd, NSArray *reps, double bw) = NULL;
+
+static id Hook_ABR_SelectQualityBandwidth(id self, SEL _cmd, NSArray *representations, double bandwidth) {
+    if (InstagramDash1440p_IsEnabled()) {
+        id chosen = SelectHighestRepresentation(representations);
+        if (chosen) {
+            return chosen;
+        }
+    }
+    if (orig_ABR_selectQualityBandwidth) {
+        id stdRep = orig_ABR_selectQualityBandwidth(self, _cmd, representations, bandwidth);
+        if (stdRep && !IsAudioRepresentation(stdRep)) {
+            UpdateRepresentationInfo(stdRep);
+        }
         return stdRep;
     }
     return representations.firstObject;
@@ -397,20 +510,25 @@ static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSIn
 
 static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
     if (track == 1 && InstagramDash1440p_IsEnabled()) { // 1 = Video Track
+        NSArray *reps = nil;
         if ([self respondsToSelector:@selector(representationsForTrack:)]) {
-            NSArray *reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), track);
-            if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
-                id highest = SelectHighestRepresentation(reps);
-                if (highest) {
-                    UpdateRepresentationInfo(highest);
-                    return highest;
-                }
+            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), track);
+        } else if ([self respondsToSelector:@selector(_representationsForVideoTrack)]) {
+            reps = ((NSArray *(*)(id, SEL))objc_msgSend)(self, @selector(_representationsForVideoTrack));
+        } else if ([self respondsToSelector:@selector(_videoRepresentations)]) {
+            reps = ((NSArray *(*)(id, SEL))objc_msgSend)(self, @selector(_videoRepresentations));
+        }
+        if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
+            id highest = SelectHighestRepresentation(reps);
+            if (highest) {
+                UpdateRepresentationInfo(highest);
+                return highest;
             }
         }
     }
     if (orig_playlist_defaultRepresentationForTrack) {
         id stdRep = orig_playlist_defaultRepresentationForTrack(self, _cmd, track);
-        if (track == 1 && stdRep) {
+        if (track == 1 && stdRep && !IsAudioRepresentation(stdRep)) {
             UpdateRepresentationInfo(stdRep);
         }
         return stdRep;
@@ -422,7 +540,7 @@ static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteg
 static void (*orig_selectedQualityProvider_setVideoSelectedQualityRep)(id self, SEL _cmd, id rep) = NULL;
 
 static void Hook_SelectedQualityProvider_SetVideoSelectedQualityRep(id self, SEL _cmd, id rep) {
-    if (rep) {
+    if (rep && !IsAudioRepresentation(rep)) {
         UpdateRepresentationInfo(rep);
     }
     if (orig_selectedQualityProvider_setVideoSelectedQualityRep) {
@@ -449,38 +567,48 @@ static void SwizzleDashClasses(void) {
         SwizzleBoth(qualityPrunerCls, sel_registerName("shouldSkipRepAOC:isOnWifi:"), (IMP)Hook_ShouldSkipRepAOC, NULL, "B@:@B");
     }
 
-    // 2. Select Highest 1440p Representation in FNFDashABRPlayerSizeQualitySelector
-    Class abrPlayerSizeCls = objc_getClass("FNFDashABRPlayerSizeQualitySelector");
-    if (abrPlayerSizeCls) {
-        SwizzleBoth(abrPlayerSizeCls, sel_registerName("_selectQualityFromRepresentations:sequenceIndices:withAvailableBandwidth:"),
-                    (IMP)Hook_ABR_SelectQualityFromReps,
-                    (IMP *)&orig_ABR_selectQualityFromReps, "@@:@^vd");
-        SwizzleBoth(abrPlayerSizeCls, sel_registerName("selectQualityFromRepresentations:sequenceIndices:withAvailableBandwidth:"),
+    // 2. Select Highest 1440p Representation across all quality selectors
+    const char *qualitySelectorClasses[] = {
+        "FNFDashABRPlayerSizeQualitySelector",
+        "FNFDashABRQualitySelector",
+        "FNFDashABRSizeBasedBweQualitySelector",
+        "FNFDashCacheQualitySelector",
+        "FNFDashMaxQualitySelector",
+        "FNFDashMinQualitySelector",
+        "FNFDashRandomQualitySelector",
+        "FNFDashRoundRobinQualitySelector",
+        "FNFDashUserSelectedQualitySelector",
+        "FNFDashMultiRepUserSelectedQualitySelector",
+        "FNFDashDefaultQualitySelector",
+        "FNFDashPrefetchQualitySelector",
+        "IGFNFDashQualityManager",
+        "FNFStitchQualityEvaluator",
+        "IGFNFStitchQualityManager",
+        "IGFNFBusyHourQualitySelector"
+    };
+
+    for (size_t i = 0; i < sizeof(qualitySelectorClasses) / sizeof(qualitySelectorClasses[0]); i++) {
+        Class qCls = objc_getClass(qualitySelectorClasses[i]);
+        if (!qCls) continue;
+
+        SwizzleBoth(qCls, sel_registerName("_selectQualityFromRepresentations:sequenceIndices:withAvailableBandwidth:"),
+                    (IMP)Hook_ABR_SelectQualityFromReps, (IMP *)&orig_ABR_selectQualityFromReps, "@@:@^vd");
+        SwizzleBoth(qCls, sel_registerName("selectQualityFromRepresentations:sequenceIndices:withAvailableBandwidth:"),
                     (IMP)Hook_ABR_SelectQualityFromReps, NULL, "@@:@^vd");
-        SwizzleBoth(abrPlayerSizeCls, sel_registerName("_selectQualityFromRepresentations:fetchSizesInBytes:sequenceIndexes:"),
-                    (IMP)Hook_ABR_SelectQualityFetchSizes,
-                    (IMP *)&orig_ABR_selectQualityFetchSizes, "@@:@^v^v");
-        SwizzleBoth(abrPlayerSizeCls, sel_registerName("selectQualityFromRepresentations:fetchSizesInBytes:sequenceIndexes:"),
+        SwizzleBoth(qCls, sel_registerName("_selectQualityFromRepresentations:fetchSizesInBytes:sequenceIndexes:"),
+                    (IMP)Hook_ABR_SelectQualityFetchSizes, (IMP *)&orig_ABR_selectQualityFetchSizes, "@@:@^v^v");
+        SwizzleBoth(qCls, sel_registerName("selectQualityFromRepresentations:fetchSizesInBytes:sequenceIndexes:"),
                     (IMP)Hook_ABR_SelectQualityFetchSizes, NULL, "@@:@^v^v");
-        SwizzleBoth(abrPlayerSizeCls, sel_registerName("_shouldSkipRepAOC:isOnWifi:"), (IMP)Hook_ShouldSkipRepAOC, NULL, "B@:@B");
-        SwizzleBoth(abrPlayerSizeCls, sel_registerName("shouldSkipRepAOC:isOnWifi:"), (IMP)Hook_ShouldSkipRepAOC, NULL, "B@:@B");
+        SwizzleBoth(qCls, sel_registerName("_selectQualityFromRepresentations:withAvailableBandwidth:"),
+                    (IMP)Hook_ABR_SelectQualityBandwidth, (IMP *)&orig_ABR_selectQualityBandwidth, "@@:@d");
+        SwizzleBoth(qCls, sel_registerName("selectQualityFromRepresentations:withAvailableBandwidth:"),
+                    (IMP)Hook_ABR_SelectQualityBandwidth, NULL, "@@:@d");
+        SwizzleBoth(qCls, sel_registerName("_shouldSkipRepAOC:isOnWifi:"), (IMP)Hook_ShouldSkipRepAOC, NULL, "B@:@B");
+        SwizzleBoth(qCls, sel_registerName("shouldSkipRepAOC:isOnWifi:"), (IMP)Hook_ShouldSkipRepAOC, NULL, "B@:@B");
+        SwizzleBoth(qCls, sel_registerName("_shouldAvoidOnABR:isIntentional:"), (IMP)Hook_ReturnNO, NULL, "B@:@B");
     }
 
-    // 3. Select Highest 1440p Representation in FNFDashABRQualitySelector
-    Class abrCls = objc_getClass("FNFDashABRQualitySelector");
-    if (abrCls) {
-        SwizzleBoth(abrCls, sel_registerName("_selectQualityFromRepresentations:sequenceIndices:withAvailableBandwidth:"),
-                    (IMP)Hook_ABR_SelectQualityFromReps, NULL, "@@:@^vd");
-        SwizzleBoth(abrCls, sel_registerName("selectQualityFromRepresentations:sequenceIndices:withAvailableBandwidth:"),
-                    (IMP)Hook_ABR_SelectQualityFromReps, NULL, "@@:@^vd");
-        SwizzleBoth(abrCls, sel_registerName("_selectQualityFromRepresentations:fetchSizesInBytes:sequenceIndexes:"),
-                    (IMP)Hook_ABR_SelectQualityFetchSizes, NULL, "@@:@^v^v");
-        SwizzleBoth(abrCls, sel_registerName("selectQualityFromRepresentations:fetchSizesInBytes:sequenceIndexes:"),
-                    (IMP)Hook_ABR_SelectQualityFetchSizes, NULL, "@@:@^v^v");
-        SwizzleBoth(abrCls, sel_registerName("_shouldAvoidOnABR:isIntentional:"), (IMP)Hook_ReturnNO, NULL, "B@:@B");
-    }
-
-    // 4. Force Wi-Fi State & Lock 1440p Default Video Representation in FNFDashPlaylist & Managers
+    // 3. Force Wi-Fi State & Lock 1440p Default Video Representation in FNFDashPlaylist & Managers
     Class playlistCls = objc_getClass("FNFDashPlaylist");
     if (playlistCls) {
         SwizzleBoth(playlistCls, sel_registerName("isOnWifi"), (IMP)Hook_ReturnYES, NULL, "B@:");
@@ -488,6 +616,17 @@ static void SwizzleDashClasses(void) {
         SwizzleBoth(playlistCls, sel_registerName("defaultRepresentationForTrack:"),
                     (IMP)Hook_Playlist_DefaultRepresentationForTrack,
                     (IMP *)&orig_playlist_defaultRepresentationForTrack, "@@:q");
+        // Prevent disabling high-res representations
+        SwizzleBoth(playlistCls, sel_registerName("_disableRepresentationsFromMpd:withComparison:disableMessage:disableCode:"),
+                    (IMP)Hook_NoOpRepresentationDisable, NULL, "v@:@@@i");
+        SwizzleBoth(playlistCls, sel_registerName("_disableRemovedRepresentations:"),
+                    (IMP)Hook_NoOpRepresentationDisable, NULL, "v@:@");
+        SwizzleBoth(playlistCls, sel_registerName("_disableLaneDroppedRepresentation:"),
+                    (IMP)Hook_NoOpRepresentationDisable, NULL, "v@:@");
+        SwizzleBoth(playlistCls, sel_registerName("_disableRepresentationsWithMisalignedPredictiveNumbers:"),
+                    (IMP)Hook_NoOpRepresentationDisable, NULL, "v@:@");
+        SwizzleBoth(playlistCls, sel_registerName("_disableRepresentationsWithMisalignedTimelines:"),
+                    (IMP)Hook_NoOpRepresentationDisable, NULL, "v@:@");
     }
 
     Class playlistMgrCls = objc_getClass("FNFDashPlaylistManager");
@@ -502,7 +641,7 @@ static void SwizzleDashClasses(void) {
                     (IMP)Hook_Playlist_DefaultRepresentationForTrack, NULL, "@@:q");
     }
 
-    // 5. Intercept Active Quality Selection in IGFNFSelectedQualityProvider
+    // 4. Intercept Active Quality Selection in IGFNFSelectedQualityProvider
     Class sqpCls = objc_getClass("IGFNFSelectedQualityProvider");
     if (sqpCls) {
         SwizzleBoth(sqpCls, sel_registerName("setVideoSelectedQualityRepresentation:"),
@@ -510,7 +649,7 @@ static void SwizzleDashClasses(void) {
                     (IMP *)&orig_selectedQualityProvider_setVideoSelectedQualityRep, "v@:@");
     }
 
-    // 6. Force 1440p Viewport, Screen Size & Ignore-Avoid-On-Cell in FNFDashVideoPlayerMetadata
+    // 5. Force 1440p Viewport, Screen Size & Ignore-Avoid-On-Cell in FNFDashVideoPlayerMetadata
     Class metaCls = objc_getClass("FNFDashVideoPlayerMetadata");
     if (metaCls) {
         SwizzleBoth(metaCls, sel_registerName("size"), (IMP)Hook_Return1440pSize, (IMP *)&orig_meta_size, "{CGSize=dd}@:");
@@ -519,16 +658,34 @@ static void SwizzleDashClasses(void) {
         SwizzleBoth(metaCls, sel_registerName("ignoreAvoidOnCell"), (IMP)Hook_ReturnYES, NULL, "B@:");
     }
 
-    // 7. Disable Data Saver Mode and Bandwidth Resolution Capping
-    const char *dashConfigClasses[] = {
-        "FNFDashPlaylistManager",
+    // 6. Enable Embedded FFmpeg VP9 Decoding and Quality Configurations
+    const char *vp9ConfigClasses[] = {
+        "FNFDecompressionConfig",
+        "FNFPlayerConfig",
+        "FNFPlayerDefaultConfig",
+        "FNFDashConfig",
+        "FNFDashConfigGen",
+        "FNFDashDefaultConfigForVod",
+        "FNFDashDefaultConfigForLive",
         "FNFDashManifestMetadata",
-        "FNFDashConfig"
+        "FNFDecompressionFFVP9",
+        "FNFVP9Decompression",
+        "FNFDashPlaylistManager",
+        "FNFDashPlaylist"
     };
 
-    for (size_t i = 0; i < sizeof(dashConfigClasses) / sizeof(dashConfigClasses[0]); i++) {
-        Class cls = objc_getClass(dashConfigClasses[i]);
+    for (size_t i = 0; i < sizeof(vp9ConfigClasses) / sizeof(vp9ConfigClasses[0]); i++) {
+        Class cls = objc_getClass(vp9ConfigClasses[i]);
         if (!cls) continue;
+        SwizzleBoth(cls, sel_registerName("enableFFVP9Decoding"), (IMP)Hook_ReturnYES, NULL, "B@:");
+        SwizzleBoth(cls, sel_registerName("enableFFVP9ZeroCopyDecoding"), (IMP)Hook_ReturnYES, NULL, "B@:");
+        SwizzleBoth(cls, sel_registerName("ffvp9EnableFastFlag"), (IMP)Hook_ReturnYES, NULL, "B@:");
+        SwizzleBoth(cls, sel_registerName("ffvp9ThreadCount"), (IMP)Hook_Return4, NULL, "i@:");
+        SwizzleBoth(cls, sel_registerName("ffvp9ThreadType"), (IMP)Hook_Return1, NULL, "i@:");
+        SwizzleBoth(cls, sel_registerName("enableVTForVP9"), (IMP)Hook_ReturnYES, NULL, "B@:");
+        SwizzleBoth(cls, sel_registerName("enableVP9VTDecodingDimensionCheck"), (IMP)Hook_ReturnNO, NULL, "B@:");
+        SwizzleBoth(cls, sel_registerName("checkForVP9DecompressionSessionCreationFailure"), (IMP)Hook_ReturnNO, NULL, "B@:");
+        SwizzleBoth(cls, sel_registerName("processDecompressionSessionCreationFailure"), (IMP)Hook_ReturnNO, NULL, "B@:");
         SwizzleBoth(cls, sel_registerName("isUserDataSaverModeEnabled"), (IMP)Hook_ReturnNO, NULL, "B@:");
         SwizzleBoth(cls, sel_registerName("bandwidthLimitedResolutionsDisabled"), (IMP)Hook_ReturnYES, NULL, "B@:");
     }
@@ -558,6 +715,7 @@ void InstagramDash1440p_Init(void) {
         NSLog(@"[InstagramDash1440p] Initializing Ultra-HD 1440p DASH Video Streaming Engine");
         NSLog(@"[InstagramDash1440p] Overriding FNF Player Size Pruner: Viewport set to 1440x2560");
         NSLog(@"[InstagramDash1440p] 1440p / Maximum Bitrate Representation Selector Active");
+        NSLog(@"[InstagramDash1440p] Embedded FFmpeg VP9 Software Decoder Enabled (4 threads)");
 
         // 1. Initial Swizzle Pass
         ApplyAllDash1440pSwizzles();
@@ -567,9 +725,9 @@ void InstagramDash1440p_Init(void) {
 
         // 3. Re-evaluate once app finishes launching
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
-                                                          object:nil
-                                                           queue:[NSOperationQueue mainQueue]
-                                                      usingBlock:^(NSNotification * _Nonnull note) {
+                                                           object:nil
+                                                            queue:[NSOperationQueue mainQueue]
+                                                       usingBlock:^(NSNotification * _Nonnull note) {
             ApplyAllDash1440pSwizzles();
         }];
 
