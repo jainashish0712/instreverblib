@@ -9,6 +9,7 @@
 #import <pthread.h>
 #import <vector>
 #import <string>
+#import <cstring>
 #import <fcntl.h>
 #import <unistd.h>
 #import <time.h>
@@ -320,16 +321,36 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
 }
 
 // ============================================================================
-// Objective-C Swizzle Helpers
+// Objective-C Swizzle Helpers & Method Introspection
 // ============================================================================
 
-static void SafeSwizzleMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
-    if (!cls || !sel || !newImp) return;
+static void LogClassMethods(Class cls) {
+    if (!cls) return;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    DashLog(@"--- Methods for %s (%u methods) ---", class_getName(cls), count);
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        const char *name = sel_getName(sel);
+        if (strcasestr(name, "quality") || strcasestr(name, "select") ||
+            strcasestr(name, "representation") || strcasestr(name, "track") ||
+            strcasestr(name, "prune") || strcasestr(name, "bandwidth")) {
+            DashLog(@"  -[%s %s]", class_getName(cls), name);
+        }
+    }
+    if (methods) free(methods);
+}
+
+static BOOL SafeSwizzleMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
+    if (!cls || !sel || !newImp) return NO;
     Method m = class_getInstanceMethod(cls, sel);
-    if (!m) return;
+    if (!m) {
+        DashLog(@"[Swizzle FAILED] -[%s %s] does not exist!", class_getName(cls), sel_getName(sel));
+        return NO;
+    }
 
     IMP orig = method_getImplementation(m);
-    if (orig == newImp) return;
+    if (orig == newImp) return YES;
 
     if (origImp && !*origImp) {
         *origImp = orig;
@@ -339,48 +360,108 @@ static void SafeSwizzleMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
     if (!class_addMethod(cls, sel, newImp, types)) {
         method_setImplementation(m, newImp);
     }
+    DashLog(@"[Swizzle OK] Successfully swizzled -[%s %s]", class_getName(cls), sel_getName(sel));
+    return YES;
 }
 
 // ============================================================================
-// Hook Implementations
+// Quality Selector General Handler (Dispatches for any FNF Quality Selector)
 // ============================================================================
 
-// 1. FNFDashPlayerSizePruner Hook: Bypass representation pruning without touching viewports
-static NSArray * (*orig_sizePruner_pruneQualities)(id self, SEL _cmd, NSArray *qualities) = NULL;
-
-static NSArray * Hook_PruneQualitiesNoOp(id self, SEL _cmd, NSArray *qualities) {
-    if (!InstagramDash1440p_IsEnabled() && orig_sizePruner_pruneQualities) {
-        return orig_sizePruner_pruneQualities(self, _cmd, qualities);
+static id HandleQualitySelection(id self, SEL _cmd, IMP origImp, const char *className) {
+    id chosen = nil;
+    if (origImp) {
+        chosen = ((id (*)(id, SEL))origImp)(self, _cmd);
     }
-    return qualities;
-}
 
-// 2. FNFDashPlaylist Hook: Force 1440p/1080p Default Representation for Background Prefetchers
-static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
+    DashLog(@"[%s] selectQuality invoked, standard result: %@", className, chosen);
 
-static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
-    if (track == 1 && InstagramDash1440p_IsEnabled()) {
-        NSArray *reps = nil;
-        if ([self respondsToSelector:@selector(representationsForTrack:)]) {
-            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), 1);
-        }
-        if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
-            id chosen = SelectTargetRepresentation(reps, YES); // YES = prefetch
-            if (chosen) {
-                return chosen;
+    if (!InstagramDash1440p_IsEnabled()) {
+        if (chosen) UpdateActiveRepresentation(chosen, NO);
+        return chosen;
+    }
+
+    // Attempt to locate candidate representations from selector instance
+    NSArray *reps = nil;
+    if ([self respondsToSelector:@selector(representations)]) {
+        @try {
+            reps = [self valueForKey:@"representations"];
+        } @catch (NSException *e) {}
+    }
+    if (!reps && [self respondsToSelector:@selector(playlist)]) {
+        @try {
+            id playlist = [self valueForKey:@"playlist"];
+            if (playlist && [playlist respondsToSelector:@selector(representationsForTrack:)]) {
+                reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 1);
+            }
+        } @catch (NSException *e) {}
+    }
+    if (!reps) {
+        Ivar ivar = class_getInstanceVariable([self class], "_playlist");
+        if (!ivar) ivar = class_getInstanceVariable([self class], "playlist");
+        if (ivar) {
+            id playlist = object_getIvar(self, ivar);
+            if (playlist && [playlist respondsToSelector:@selector(representationsForTrack:)]) {
+                reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 1);
             }
         }
     }
-    if (orig_playlist_defaultRepresentationForTrack) {
-        return orig_playlist_defaultRepresentationForTrack(self, _cmd, track);
+    if (!reps) {
+        Ivar ivar = class_getInstanceVariable([self class], "_representations");
+        if (!ivar) ivar = class_getInstanceVariable([self class], "representations");
+        if (ivar) {
+            reps = (NSArray *)object_getIvar(self, ivar);
+        }
     }
-    return nil;
+
+    if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
+        BOOL isPrefetch = (strstr(className, "Prefetch") != NULL);
+        id targetRep = SelectTargetRepresentation(reps, isPrefetch);
+        if (targetRep) {
+            DashLog(@"[%s] Forcing target quality representation: %@", className, targetRep);
+            return targetRep;
+        }
+    } else {
+        DashLog(@"[%s] Could not extract candidate representations array; tracking standard result: %@", className, chosen);
+        if (chosen) {
+            UpdateActiveRepresentation(chosen, NO);
+        }
+    }
+
+    return chosen;
 }
 
-// 3. FNFDashABRQualitySelector Hook: ABI-Safe std::vector<int> Quality Selection
+// Dedicated function pointers and hooks for each quality selector class
+static id (*orig_ABRQualitySelector_selectQuality)(id self, SEL _cmd) = NULL;
+static id Hook_ABRQualitySelector_SelectQuality(id self, SEL _cmd) {
+    return HandleQualitySelection(self, _cmd, (IMP)orig_ABRQualitySelector_selectQuality, "FNFDashABRQualitySelector");
+}
+
+static id (*orig_DefaultQualitySelector_selectQuality)(id self, SEL _cmd) = NULL;
+static id Hook_DefaultQualitySelector_SelectQuality(id self, SEL _cmd) {
+    return HandleQualitySelection(self, _cmd, (IMP)orig_DefaultQualitySelector_selectQuality, "FNFDashDefaultQualitySelector");
+}
+
+static id (*orig_QualitySelector_selectQuality)(id self, SEL _cmd) = NULL;
+static id Hook_QualitySelector_SelectQuality(id self, SEL _cmd) {
+    return HandleQualitySelection(self, _cmd, (IMP)orig_QualitySelector_selectQuality, "FNFDashQualitySelector");
+}
+
+static id (*orig_PrefetchQualitySelector_selectQuality)(id self, SEL _cmd) = NULL;
+static id Hook_PrefetchQualitySelector_SelectQuality(id self, SEL _cmd) {
+    return HandleQualitySelection(self, _cmd, (IMP)orig_PrefetchQualitySelector_selectQuality, "FNFDashPrefetchQualitySelector");
+}
+
+static id (*orig_LiveQualitySelector_selectQuality)(id self, SEL _cmd) = NULL;
+static id Hook_LiveQualitySelector_SelectQuality(id self, SEL _cmd) {
+    return HandleQualitySelection(self, _cmd, (IMP)orig_LiveQualitySelector_selectQuality, "FNFDashLiveQualitySelector");
+}
+
+// Hook for FNFDashABRQualitySelector _selectQualityFromRepresentations:sequenceIndices:withAvailableBandwidth:
 static id (*orig_ABR_selectQualitySeqIndices)(id self, SEL _cmd, NSArray *representations, std::vector<int> seqIndices, double bandwidth) = NULL;
 
 static id Hook_ABR_SelectQualitySeqIndices(id self, SEL _cmd, NSArray *representations, std::vector<int> seqIndices, double bandwidth) {
+    DashLog(@"[FNFDashABRQualitySelector] _selectQualityFromRepresentations:sequenceIndices:... called with %lu reps", (unsigned long)representations.count);
     if (InstagramDash1440p_IsEnabled() && representations && [representations isKindOfClass:[NSArray class]] && representations.count > 0) {
         id chosen = SelectTargetRepresentation(representations, NO);
         if (chosen) {
@@ -393,7 +474,42 @@ static id Hook_ABR_SelectQualitySeqIndices(id self, SEL _cmd, NSArray *represent
     return representations.firstObject;
 }
 
-// 4. VideoToolbox Hardware/Hybrid VP9 Decoding Activation
+// Hook for FNFDashPlayerSizePruner
+static NSArray * (*orig_sizePruner_pruneQualities)(id self, SEL _cmd, NSArray *qualities) = NULL;
+
+static NSArray * Hook_PruneQualitiesNoOp(id self, SEL _cmd, NSArray *qualities) {
+    DashLog(@"[FNFDashPlayerSizePruner] pruneQualities: called with %lu qualities", (unsigned long)qualities.count);
+    if (!InstagramDash1440p_IsEnabled() && orig_sizePruner_pruneQualities) {
+        return orig_sizePruner_pruneQualities(self, _cmd, qualities);
+    }
+    return qualities;
+}
+
+// Hook for FNFDashPlaylist defaultRepresentationForTrack:
+static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
+
+static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
+    DashLog(@"[FNFDashPlaylist] defaultRepresentationForTrack:%ld invoked", (long)track);
+    if (track == 1 && InstagramDash1440p_IsEnabled()) {
+        NSArray *reps = nil;
+        if ([self respondsToSelector:@selector(representationsForTrack:)]) {
+            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), 1);
+        }
+        if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
+            id chosen = SelectTargetRepresentation(reps, YES);
+            if (chosen) {
+                DashLog(@"[FNFDashPlaylist] defaultRepresentationForTrack forced: %@", chosen);
+                return chosen;
+            }
+        }
+    }
+    if (orig_playlist_defaultRepresentationForTrack) {
+        return orig_playlist_defaultRepresentationForTrack(self, _cmd, track);
+    }
+    return nil;
+}
+
+// Hooks for VideoToolbox VP9 Hardware Activation
 static BOOL Hook_ReturnYES(id self, SEL _cmd) {
     return YES;
 }
@@ -402,10 +518,11 @@ static BOOL Hook_ReturnNO(id self, SEL _cmd, id rep, BOOL isIntentional) {
     return NO;
 }
 
-// 5. Active Telemetry Observer Hook
+// Hooks for IGFNFSelectedQualityProvider
 static void (*orig_qualityProvider_videoQualitySelected)(id self, SEL _cmd, id rep, id meta, NSInteger track) = NULL;
 
 static void Hook_QualityProvider_VideoQualitySelected(id self, SEL _cmd, id rep, id meta, NSInteger track) {
+    DashLog(@"[IGFNFSelectedQualityProvider] videoQualitySelected: track=%ld rep=%@", (long)track, rep);
     if (track == 1 && rep && !IsAudioRepresentation(rep)) {
         BOOL isIntentional = YES;
         if (meta && [meta respondsToSelector:@selector(isIntentional)]) {
@@ -420,40 +537,78 @@ static void Hook_QualityProvider_VideoQualitySelected(id self, SEL _cmd, id rep,
     }
 }
 
+static void (*orig_qualityProvider_setVideoRep)(id self, SEL _cmd, id rep) = NULL;
+
+static void Hook_QualityProvider_SetVideoRep(id self, SEL _cmd, id rep) {
+    DashLog(@"[IGFNFSelectedQualityProvider] setVideoSelectedQualityRepresentation: %@", rep);
+    if (rep && !IsAudioRepresentation(rep)) {
+        UpdateActiveRepresentation(rep, NO);
+    }
+    if (orig_qualityProvider_setVideoRep) {
+        orig_qualityProvider_setVideoRep(self, _cmd, rep);
+    }
+}
+
 // ============================================================================
 // Swizzle Registration & Initialization
 // ============================================================================
 
 static void SwizzleDashClasses(void) {
-    DashLog(@"Registering 1440p VP9 DASH hooks...");
+    DashLog(@"Registering 1440p VP9 DASH hooks and analyzing runtime classes...");
 
-    // 1. Bypass Player Size Pruning in FNFDashPlayerSizePruner
+    // 1. FNFDashPlayerSizePruner
     Class sizePrunerCls = objc_getClass("FNFDashPlayerSizePruner");
     if (sizePrunerCls) {
+        LogClassMethods(sizePrunerCls);
         SafeSwizzleMethod(sizePrunerCls, sel_registerName("pruneQualities:"),
                           (IMP)Hook_PruneQualitiesNoOp, (IMP *)&orig_sizePruner_pruneQualities);
-        DashLog(@"[Swizzle] FNFDashPlayerSizePruner pruneQualities: swizzled");
+    } else {
+        DashLog(@"[Warning] FNFDashPlayerSizePruner class not found");
     }
 
-    // 2. Force 1440p/1080p in FNFDashPlaylist defaultRepresentationForTrack: (Prefetch & Instant Startup)
+    // 2. FNFDashPlaylist
     Class playlistCls = objc_getClass("FNFDashPlaylist");
     if (playlistCls) {
+        LogClassMethods(playlistCls);
         SafeSwizzleMethod(playlistCls, sel_registerName("defaultRepresentationForTrack:"),
                           (IMP)Hook_Playlist_DefaultRepresentationForTrack, (IMP *)&orig_playlist_defaultRepresentationForTrack);
-        DashLog(@"[Swizzle] FNFDashPlaylist defaultRepresentationForTrack: swizzled");
+    } else {
+        DashLog(@"[Warning] FNFDashPlaylist class not found");
     }
 
-    // 3. Force 1440p/1080p in FNFDashABRQualitySelector
+    // 3. Multi-Class Quality Selectors: Hook selectQuality on all known selector variants
+    struct QualitySelectorBinding {
+        const char *name;
+        IMP hook;
+        IMP *orig;
+    } selectors[] = {
+        {"FNFDashABRQualitySelector", (IMP)Hook_ABRQualitySelector_SelectQuality, (IMP *)&orig_ABRQualitySelector_selectQuality},
+        {"FNFDashDefaultQualitySelector", (IMP)Hook_DefaultQualitySelector_SelectQuality, (IMP *)&orig_DefaultQualitySelector_selectQuality},
+        {"FNFDashQualitySelector", (IMP)Hook_QualitySelector_SelectQuality, (IMP *)&orig_QualitySelector_selectQuality},
+        {"FNFDashPrefetchQualitySelector", (IMP)Hook_PrefetchQualitySelector_SelectQuality, (IMP *)&orig_PrefetchQualitySelector_selectQuality},
+        {"FNFDashLiveQualitySelector", (IMP)Hook_LiveQualitySelector_SelectQuality, (IMP *)&orig_LiveQualitySelector_selectQuality}
+    };
+
+    for (size_t i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
+        Class qCls = objc_getClass(selectors[i].name);
+        if (qCls) {
+            LogClassMethods(qCls);
+            SafeSwizzleMethod(qCls, sel_registerName("selectQuality"), selectors[i].hook, selectors[i].orig);
+        } else {
+            DashLog(@"[Notice] %s class not loaded in runtime", selectors[i].name);
+        }
+    }
+
+    // 3b. FNFDashABRQualitySelector Sequence Indices variant
     Class abrCls = objc_getClass("FNFDashABRQualitySelector");
     if (abrCls) {
         SafeSwizzleMethod(abrCls, sel_registerName("_selectQualityFromRepresentations:sequenceIndices:withAvailableBandwidth:"),
                           (IMP)Hook_ABR_SelectQualitySeqIndices, (IMP *)&orig_ABR_selectQualitySeqIndices);
         SafeSwizzleMethod(abrCls, sel_registerName("_shouldAvoidOnABR:isIntentional:"),
                           (IMP)Hook_ReturnNO, NULL);
-        DashLog(@"[Swizzle] FNFDashABRQualitySelector swizzled successfully");
     }
 
-    // 4. Activate VideoToolbox VP9 Hardware/Hybrid Decoding
+    // 4. VideoToolbox VP9 Hardware Activation
     const char *vp9Classes[] = {
         "FNFPlayerConfig",
         "FNFDecompressionConfig"
@@ -461,19 +616,21 @@ static void SwizzleDashClasses(void) {
     for (size_t i = 0; i < sizeof(vp9Classes) / sizeof(vp9Classes[0]); i++) {
         Class vCls = objc_getClass(vp9Classes[i]);
         if (!vCls) continue;
+        LogClassMethods(vCls);
         SafeSwizzleMethod(vCls, sel_registerName("enableVTForVP9"), (IMP)Hook_ReturnYES, NULL);
-        DashLog(@"[Swizzle] %s enableVTForVP9 swizzled", vp9Classes[i]);
     }
 
-    // 5. Active Telemetry Observer
+    // 5. Active Telemetry Observers
     Class qualityProviderCls = objc_getClass("IGFNFSelectedQualityProvider");
     if (qualityProviderCls) {
+        LogClassMethods(qualityProviderCls);
         SafeSwizzleMethod(qualityProviderCls, sel_registerName("videoQualitySelected:playerMetadata:trackType:"),
                           (IMP)Hook_QualityProvider_VideoQualitySelected, (IMP *)&orig_qualityProvider_videoQualitySelected);
-        DashLog(@"[Swizzle] IGFNFSelectedQualityProvider swizzled");
+        SafeSwizzleMethod(qualityProviderCls, sel_registerName("setVideoSelectedQualityRepresentation:"),
+                          (IMP)Hook_QualityProvider_SetVideoRep, (IMP *)&orig_qualityProvider_setVideoRep);
     }
 
-    DashLog(@"1440p VP9 DASH hook registration complete");
+    DashLog(@"1440p VP9 DASH hook registration pass finished");
 }
 
 static void ApplyAllDash1440pSwizzles(void) {
