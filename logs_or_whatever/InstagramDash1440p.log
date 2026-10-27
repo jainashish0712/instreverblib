@@ -1,0 +1,112 @@
+
+[2026-10-27 23:58:28] [InstagramDash1440p] Overriding FNF Player Size Pruner: Viewport set to 1440x2560
+[2026-10-27 23:58:28] [InstagramDash1440p] 1440p / Maximum Bitrate Representation Selector Active
+[2026-10-27 23:58:28] [InstagramDash1440p] Embedded FFmpeg VP9 Software Decoder Enabled (4 threads)
+[2026-10-27 23:58:28] [InstagramDash1440p] Installing DASH 1440p hooks...
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] FNFDashPlayerSizePruner pruneQualities: swizzled successfully
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] FNFDashABRQualitySelector swizzled successfully
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] FNFDashPlaylist swizzled successfully
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] FNFDashVideoPlayerMetadata swizzled successfully
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] IGFNFSelectedQualityProvider swizzled successfully
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] FNFDashSelectionMetadata swizzled successfully
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] IGBandwidthEstimator downloadBandwidthEstimateBitsPerSecond swizzled
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] IGFNFBandwidthProvider downloadBandwidthEstimateBitsPerSecond swizzled
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] IGMediaHistoricalBandwidthEstimateProvider downloadBandwidthEstimateBitsPerSecond swizzled
+[2026-10-27 23:58:28] [InstagramDash1440p] DASH 1440p hook installation completed
+[2026-10-27 23:58:28] [InstagramDash1440p] 1440p DASH Streaming Engine Active: Max Quality Locked
+[2026-10-27 23:58:28] [InstagramDash1440p] ========================================================
+[2026-10-27 23:58:28] [InstagramDash1440p] UIApplicationDidFinishLaunchingNotification received, refreshing swizzles
+[2026-10-27 23:58:28] [InstagramDash1440p] Installing DASH 1440p hooks...
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] FNFDashPlayerSizePruner pruneQualities: swizzled successfully
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] FNFDashABRQualitySelector swizzled successfully
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] FNFDashPlaylist swizzled successfully
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] FNFDashVideoPlayerMetadata swizzled successfully
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] IGFNFSelectedQualityProvider swizzled successfully
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] FNFDashSelectionMetadata swizzled successfully
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] IGBandwidthEstimator downloadBandwidthEstimateBitsPerSecond swizzled
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] IGFNFBandwidthProvider downloadBandwidthEstimateBitsPerSecond swizzled
+[2026-10-27 23:58:28] [InstagramDash1440p] [Swizzle] IGMediaHistoricalBandwidthEstimateProvider downloadBandwidthEstimateBitsPerSecond swizzled
+[2026-10-27 23:58:28] [InstagramDash1440p] DASH 1440p hook installation completed
+[2026-10-27 23:58:29] [InstagramDash1440p] Delayed 1.5s check executing, verifying swizzles
+[2026-10-27 23:58:29] [InstagramDash1440p] Installing DASH 1440p hooks...
+[2026-10-27 23:58:29] [InstagramDash1440p] [Swizzle] FNFDashPlayerSizePruner pruneQualities: swizzled successfully
+[2026-10-27 23:58:29] [InstagramDash1440p] [Swizzle] FNFDashABRQualitySelector swizzled successfully
+[2026-10-27 23:58:29] [InstagramDash1440p] [Swizzle] FNFDashPlaylist swizzled successfully
+[2026-10-27 23:58:29] [InstagramDash1440p] [Swizzle] FNFDashVideoPlayerMetadata swizzled successfully
+[2026-10-27 23:58:29] [InstagramDash1440p] [Swizzle] IGFNFSelectedQualityProvider swizzled successfully
+[2026-10-27 23:58:29] [InstagramDash1440p] [Swizzle] FNFDashSelectionMetadata swizzled successfully
+[2026-10-27 23:58:29] [InstagramDash1440p] [Swizzle] IGBandwidthEstimator downloadBandwidthEstimateBitsPerSecond swizzled
+[2026-10-27 23:58:29] [InstagramDash1440p] [Swizzle] IGFNFBandwidthProvider downloadBandwidthEstimateBitsPerSecond swizzled
+[2026-10-27 23:58:29] [InstagramDash1440p] [Swizzle] IGMediaHistoricalBandwidthEstimateProvider downloadBandwidthEstimateBitsPerSecond swizzled
+[2026-10-27 23:58:29] [InstagramDash1440p] DASH 1440p hook installation completed
+[2026-10-27 23:58:32] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-18126492169931938v (Actual 1440p: 0, Resolution: 360x450)
+[2026-10-27 23:58:32] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1010492032042396v (Actual 1440p: 0, Resolution: 1276x718)
+[2026-10-27 23:58:34] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-18126492169931938v (Actual 1440p: 0, Resolution: 360x450)
+[2026-10-27 23:58:42] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1010492032042396v (Actual 1440p: 0, Resolution: 1276x718)
+[2026-10-27 23:58:44] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1682998889915504v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:58:45] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1010492032042396v (Actual 1440p: 0, Resolution: 1276x718)
+[2026-10-27 23:58:52] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1682998889915504v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1613727510279632v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2253979808887761v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1613727510279632v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2253979808887761v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1613727510279632v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1394063805587447v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2253979808887761v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1132287992578101v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1394063805587447v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1132287992578101v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1394063805587447v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2253979808887761v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1132287992578101v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:58:58] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1613727510279632v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:10] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1539628824146360v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:59:14] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2268354170408852v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:15] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1539628824146360v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1613727510279632v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2253979808887761v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1613727510279632v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2253979808887761v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1394063805587447v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1132287992578101v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1613727510279632v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2253979808887761v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1394063805587447v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1132287992578101v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1613727510279632v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2253979808887761v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1394063805587447v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:59:19] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1132287992578101v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:21] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2253979798887762v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:21] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1394063805587447v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:59:21] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1132287992578101v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:21] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2253979798887762v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:21] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1394063805587447v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-27 23:59:21] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-1132287992578101v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:21] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2253979798887762v (Actual 1440p: 0, Resolution: 1080x1920)
+[2026-10-27 23:59:35] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1665294911822981v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-27 23:59:39] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1079848834835350v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-27 23:59:41] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1665294911822981v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-27 23:59:55] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1853361922373083v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-27 23:59:57] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1079848834835350v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-27 23:59:58] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1853361922373083v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:00:00] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1079848834835350v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:00:07] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1853361922373083v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:00:22] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1079848834835350v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:00:22] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1853361922373083v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:00:22] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1079848834835350v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:00:22] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1853361922373083v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:00:23] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1079848834835350v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:00:31] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1853361922373083v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:00:31] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1079848834835350v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:00:31] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1853361922373083v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:00:40] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2073258340247635v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-28 00:00:43] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2133994007155936v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-28 00:00:45] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2073258340247635v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-28 00:01:34] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1079848834835350v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:01:34] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2073258340247635v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-28 00:01:34] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1079848834835350v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:01:34] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2133994007155936v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-28 00:01:34] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2073258340247635v (Actual 1440p: 0, Resolution: 720x1280)
+[2026-10-28 00:01:34] [InstagramDash1440p] Quality updated -> Quality: 1440p, File: fdash-1079848834835350v (Actual 1440p: 1, Resolution: 1440x2560)
+[2026-10-28 00:01:34] [InstagramDash1440p] Quality updated -> Quality: 1080p, File: fdash-2133994007155936v (Actual 1440p: 0, Resolution: 720x1280)

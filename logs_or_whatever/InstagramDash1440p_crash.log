@@ -1,0 +1,33 @@
+
+=================================================================
+FATAL POSIX SIGNAL TRAPPED BY INSTAGRAM DASH 1440p ENGINE
+Signal: 11 -> SIGSEGV (Segmentation Fault)
+Faulting Memory Address: 0x4600e1a20b6cd0
+PID: 13918
+Call Stack Backtrace:
+=================================================================
+  0   InstagramReverb.dylib               0x0000000100fbea24 DashSignalCrashHandler + 180
+  1   libsystem_platform.dylib            0x000000021d35fa68 6079E486-F642-3100-AE63-B58DF5F5C343 + 10856
+  2   libobjc.A.dylib                     0x00000001904c58b4 A79BB6C8-1243-3B49-9DB1-500C3DA8E2A0 + 55476
+  3   libobjc.A.dylib                     0x00000001904bdf1c A79BB6C8-1243-3B49-9DB1-500C3DA8E2A0 + 24348
+  4   libobjc.A.dylib                     0x00000001904c3cec _objc_rootDealloc + 72
+  5   FBSharedFramework                   0x00000001078d9200 IGVideoSize + 11084
+  6   libobjc.A.dylib                     0x00000001904c5c14 A79BB6C8-1243-3B49-9DB1-500C3DA8E2A0 + 56340
+  7   libobjc.A.dylib                     0x00000001904bdf0c A79BB6C8-1243-3B49-9DB1-500C3DA8E2A0 + 24332
+  8   libobjc.A.dylib                     0x00000001904c3cec _objc_rootDealloc + 72
+  9   FBSharedFramework                   0x00000001078d7a7c IGVideoSize + 5064
+  10  libobjc.A.dylib                     0x00000001904c5c14 A79BB6C8-1243-3B49-9DB1-500C3DA8E2A0 + 56340
+  11  libobjc.A.dylib                     0x00000001904bdf0c A79BB6C8-1243-3B49-9DB1-500C3DA8E2A0 + 24332
+  12  libobjc.A.dylib                     0x00000001904c3cec _objc_rootDealloc + 72
+  13  FBSharedFramework                   0x00000001078d6bd0 IGVideoSize + 1308
+  14  libsystem_blocks.dylib              0x000000021d405850 657A18A5-04FD-37CA-A621-56B9B1B37090 + 6224
+  15  libsystem_blocks.dylib              0x000000021d405354 _Block_release + 236
+  16  libdispatch.dylib                   0x000000019aeed584 C19E1CAE-FEE0-3E31-844D-A31BF2C39BD7 + 112004
+  17  libdispatch.dylib                   0x000000019aedc2d0 C19E1CAE-FEE0-3E31-844D-A31BF2C39BD7 + 41680
+  18  libdispatch.dylib                   0x000000019aedcdac C19E1CAE-FEE0-3E31-844D-A31BF2C39BD7 + 44460
+  19  libdispatch.dylib                   0x000000019aee71dc C19E1CAE-FEE0-3E31-844D-A31BF2C39BD7 + 86492
+  20  libdispatch.dylib                   0x000000019aee6a60 C19E1CAE-FEE0-3E31-844D-A31BF2C39BD7 + 84576
+  21  libsystem_pthread.dylib             0x000000021d408a0c _pthread_wqthread + 292
+  22  libsystem_pthread.dylib             0x000000021d408aac start_wqthread + 8
+=================================================================
+
