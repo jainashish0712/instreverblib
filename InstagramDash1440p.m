@@ -33,7 +33,7 @@ static NSString *g_currentQuality = @"1080p";
 static NSString *g_currentFdashFilename = @"fdash-ready";
 static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
 
-static __weak id g_lastHighestVideoRep = nil;
+static id g_lastHighestVideoRep = nil;
 static const char *kPlaylistHighestVideoRepKey = "kPlaylistHighestVideoRepKey";
 
 BOOL InstagramDash1440p_IsEnabled(void) {
@@ -554,26 +554,45 @@ static id Hook_ABR_SelectQualityBandwidth(id self, SEL _cmd, NSArray *representa
 // FNFDashPlaylist Hooks
 // ----------------------------------------------------------------------------
 
+static NSArray * (*orig_playlist_allRepresentationsForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
+static NSArray * (*orig_playlist_representationsForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
 static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
+static id (*orig_playlist_defaultVideoRep)(id self, SEL _cmd) = NULL;
+
+static id FindOrExtractHighestVideoRep(id playlist) {
+    if (!playlist) return g_lastHighestVideoRep;
+    id highest = objc_getAssociatedObject(playlist, kPlaylistHighestVideoRepKey);
+    if (highest) return highest;
+
+    NSArray *reps = nil;
+    if (orig_playlist_allRepresentationsForTrack) {
+        reps = orig_playlist_allRepresentationsForTrack(playlist, @selector(allRepresentationsForTrack:), 1);
+    } else if ([playlist respondsToSelector:@selector(allRepresentationsForTrack:)]) {
+        reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(allRepresentationsForTrack:), 1);
+    }
+    if (!reps || reps.count == 0) {
+        if (orig_playlist_representationsForTrack) {
+            reps = orig_playlist_representationsForTrack(playlist, @selector(representationsForTrack:), 1);
+        } else if ([playlist respondsToSelector:@selector(representationsForTrack:)]) {
+            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 1);
+        }
+    }
+    highest = SelectHighestRepresentation(reps);
+    if (highest) {
+        objc_setAssociatedObject(playlist, kPlaylistHighestVideoRepKey, highest, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        g_lastHighestVideoRep = highest;
+        UpdateRepresentationInfo(highest);
+    }
+    return highest ?: g_lastHighestVideoRep;
+}
 
 static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
     if (track == 1 && InstagramDash1440p_IsEnabled()) {
         id playlist = ExtractPlaylistFromObject(self);
-        if (playlist) {
-            id cachedHighest = objc_getAssociatedObject(playlist, kPlaylistHighestVideoRepKey);
-            if (cachedHighest) {
-                UpdateRepresentationInfo(cachedHighest);
-                return cachedHighest;
-            }
-            NSArray *reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 1);
-            if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
-                id highest = SelectHighestRepresentation(reps);
-                if (highest) {
-                    objc_setAssociatedObject(playlist, kPlaylistHighestVideoRepKey, highest, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    UpdateRepresentationInfo(highest);
-                    return highest;
-                }
-            }
+        id highest = FindOrExtractHighestVideoRep(playlist ?: self);
+        if (highest) {
+            UpdateRepresentationInfo(highest);
+            return highest;
         }
     }
     if (orig_playlist_defaultRepresentationForTrack) {
@@ -586,20 +605,28 @@ static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteg
     return nil;
 }
 
+static id Hook_Playlist_DefaultVideoRepresentation(id self, SEL _cmd) {
+    if (InstagramDash1440p_IsEnabled()) {
+        id highest = FindOrExtractHighestVideoRep(self);
+        if (highest) {
+            UpdateRepresentationInfo(highest);
+            return highest;
+        }
+    }
+    if (orig_playlist_defaultVideoRep) {
+        return orig_playlist_defaultVideoRep(self, _cmd);
+    }
+    return nil;
+}
+
 static void (*orig_playlist_setDefaultRepresentation)(id self, SEL _cmd, id rep, NSInteger track) = NULL;
 
 static void Hook_Playlist_SetDefaultRepresentation(id self, SEL _cmd, id rep, NSInteger track) {
     if (track == 1 && InstagramDash1440p_IsEnabled()) {
         id playlist = ExtractPlaylistFromObject(self);
-        if (playlist) {
-            NSArray *reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 1);
-            if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
-                id highest = SelectHighestRepresentation(reps);
-                if (highest) {
-                    rep = highest;
-                    objc_setAssociatedObject(playlist, kPlaylistHighestVideoRepKey, highest, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                }
-            }
+        id highest = FindOrExtractHighestVideoRep(playlist ?: self);
+        if (highest) {
+            rep = highest;
         }
     }
     if (orig_playlist_setDefaultRepresentation) {
@@ -612,17 +639,11 @@ static void (*orig_playlist_updateDefaultRepresentationForTrack)(id self, SEL _c
 static void Hook_Playlist_UpdateDefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
     if (track == 1 && InstagramDash1440p_IsEnabled()) {
         id playlist = ExtractPlaylistFromObject(self);
-        if (playlist) {
-            NSArray *reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 1);
-            if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
-                id highest = SelectHighestRepresentation(reps);
-                if (highest) {
-                    objc_setAssociatedObject(playlist, kPlaylistHighestVideoRepKey, highest, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    if ([playlist respondsToSelector:@selector(setDefaultRepresentation:track:)]) {
-                        ((void (*)(id, SEL, id, NSInteger))objc_msgSend)(playlist, @selector(setDefaultRepresentation:track:), highest, 1);
-                        return;
-                    }
-                }
+        id highest = FindOrExtractHighestVideoRep(playlist ?: self);
+        if (highest) {
+            if ([playlist respondsToSelector:@selector(setDefaultRepresentation:track:)]) {
+                ((void (*)(id, SEL, id, NSInteger))objc_msgSend)(playlist, @selector(setDefaultRepresentation:track:), highest, 1);
+                return;
             }
         }
     }
@@ -631,18 +652,24 @@ static void Hook_Playlist_UpdateDefaultRepresentationForTrack(id self, SEL _cmd,
     }
 }
 
-static NSArray * (*orig_playlist_representationsForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
-
 static NSArray * Hook_Playlist_RepresentationsForTrack(id self, SEL _cmd, NSInteger track) {
-    NSArray *reps = orig_playlist_representationsForTrack ? orig_playlist_representationsForTrack(self, _cmd, track) : nil;
-    if (track == 1 && InstagramDash1440p_IsEnabled() && reps && reps.count > 0) {
-        id highest = SelectHighestRepresentation(reps);
+    if (track == 1 && InstagramDash1440p_IsEnabled()) {
+        id highest = FindOrExtractHighestVideoRep(self);
         if (highest) {
-            objc_setAssociatedObject(self, kPlaylistHighestVideoRepKey, highest, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            UpdateRepresentationInfo(highest);
+            return @[highest];
         }
     }
-    return reps;
+    return orig_playlist_representationsForTrack ? orig_playlist_representationsForTrack(self, _cmd, track) : nil;
+}
+
+static NSArray * Hook_Playlist_AllRepresentationsForTrack(id self, SEL _cmd, NSInteger track) {
+    if (track == 1 && InstagramDash1440p_IsEnabled()) {
+        id highest = FindOrExtractHighestVideoRep(self);
+        if (highest) {
+            return @[highest];
+        }
+    }
+    return orig_playlist_allRepresentationsForTrack ? orig_playlist_allRepresentationsForTrack(self, _cmd, track) : nil;
 }
 
 // ----------------------------------------------------------------------------
@@ -667,28 +694,17 @@ static id Hook_QualitySelector_SelectQuality(id self, SEL _cmd) {
     }
 
     id playlist = ExtractPlaylistFromObject(self);
-    id highest = nil;
-    if (playlist) {
-        highest = objc_getAssociatedObject(playlist, kPlaylistHighestVideoRepKey);
-        if (!highest && [playlist respondsToSelector:@selector(representationsForTrack:)]) {
-            NSArray *reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 1);
-            highest = SelectHighestRepresentation(reps);
-            if (highest) {
-                objc_setAssociatedObject(playlist, kPlaylistHighestVideoRepKey, highest, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
-        }
-    }
-    if (!highest) {
-        highest = g_lastHighestVideoRep;
-    }
+    id highest = FindOrExtractHighestVideoRep(playlist);
 
     if (highest) {
         // Substitute selectedRepresentation on selection
         @try {
             [selection setValue:highest forKey:@"_selectedRepresentation"];
         } @catch (id ex) {
-            // Direct ivar backup: offset 8 in FNFDashSelectionMetadata
-            *(id *)((uintptr_t)selection + 8) = highest;
+            Ivar ivar = class_getInstanceVariable(object_getClass(selection), "_selectedRepresentation");
+            if (ivar) {
+                object_setIvar(selection, ivar, highest);
+            }
         }
         UpdateRepresentationInfo(highest);
     }
@@ -703,21 +719,17 @@ static id Hook_QualitySelector_SelectQuality(id self, SEL _cmd) {
 static id (*orig_selMeta_selectedRepresentation)(id self, SEL _cmd) = NULL;
 
 static id Hook_SelMeta_SelectedRepresentation(id self, SEL _cmd) {
-    id rep = orig_selMeta_selectedRepresentation ? orig_selMeta_selectedRepresentation(self, _cmd) : nil;
-    if (!InstagramDash1440p_IsEnabled() || !rep || IsAudioRepresentation(rep)) {
-        return rep;
-    }
-    NSInteger track = 1;
-    if ([self respondsToSelector:@selector(trackType)]) {
-        track = ((NSInteger (*)(id, SEL))objc_msgSend)(self, @selector(trackType));
-    }
-    if (track == 1 && g_lastHighestVideoRep) {
-        CGSize sz = GetRepresentationPixelDimensions(rep);
-        if (sz.width < 1440.0f && sz.height < 2560.0f) {
+    if (InstagramDash1440p_IsEnabled()) {
+        NSInteger track = 1;
+        if ([self respondsToSelector:@selector(trackType)]) {
+            track = ((NSInteger (*)(id, SEL))objc_msgSend)(self, @selector(trackType));
+        }
+        if (track == 1 && g_lastHighestVideoRep) {
             UpdateRepresentationInfo(g_lastHighestVideoRep);
             return g_lastHighestVideoRep;
         }
     }
+    id rep = orig_selMeta_selectedRepresentation ? orig_selMeta_selectedRepresentation(self, _cmd) : nil;
     if (rep && !IsAudioRepresentation(rep)) {
         UpdateRepresentationInfo(rep);
     }
@@ -729,14 +741,9 @@ static id (*orig_selMeta_initWithSelectedRepQualityTrack)(id self, SEL _cmd, id 
 static id Hook_SelMeta_InitWithSelectedRepQualityTrack(id self, SEL _cmd, id rep, id qMeta, NSInteger track) {
     if (track == 1 && InstagramDash1440p_IsEnabled()) {
         id playlist = ExtractPlaylistFromObject(qMeta);
-        if (playlist) {
-            NSArray *reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 1);
-            id highest = SelectHighestRepresentation(reps);
-            if (highest) {
-                rep = highest;
-            }
-        } else if (g_lastHighestVideoRep) {
-            rep = g_lastHighestVideoRep;
+        id highest = FindOrExtractHighestVideoRep(playlist);
+        if (highest) {
+            rep = highest;
         }
     }
     if (orig_selMeta_initWithSelectedRepQualityTrack) {
@@ -753,6 +760,18 @@ static id Hook_SelMeta_InitWithSelectedRepTrack(id self, SEL _cmd, id rep, NSInt
     }
     if (orig_selMeta_initWithSelectedRepTrack) {
         return orig_selMeta_initWithSelectedRepTrack(self, _cmd, rep, track);
+    }
+    return self;
+}
+
+static id (*orig_selMeta_initWith4Params)(id self, SEL _cmd, id rep, id qMeta, id reqMeta, id respMeta, NSInteger track) = NULL;
+
+static id Hook_SelMeta_InitWith4Params(id self, SEL _cmd, id rep, id qMeta, id reqMeta, id respMeta, NSInteger track) {
+    if (track == 1 && InstagramDash1440p_IsEnabled() && g_lastHighestVideoRep) {
+        rep = g_lastHighestVideoRep;
+    }
+    if (orig_selMeta_initWith4Params) {
+        return orig_selMeta_initWith4Params(self, _cmd, rep, qMeta, reqMeta, respMeta, track);
     }
     return self;
 }
@@ -777,23 +796,17 @@ static id Hook_ChunkMgr_SelectFetchRepresentation(id self, SEL _cmd) {
 
     if (track == 1) {
         id playlist = ExtractPlaylistFromObject(self);
-        if (playlist) {
-            id cachedHighest = objc_getAssociatedObject(playlist, kPlaylistHighestVideoRepKey);
-            if (cachedHighest) {
-                UpdateRepresentationInfo(cachedHighest);
-                return cachedHighest;
+        id highest = FindOrExtractHighestVideoRep(playlist);
+        if (highest) {
+            @try {
+                [result setValue:highest forKey:@"_selectedRepresentation"];
+            } @catch (id ex) {
+                Ivar ivar = class_getInstanceVariable(object_getClass(result), "_selectedRepresentation");
+                if (ivar) {
+                    object_setIvar(result, ivar, highest);
+                }
             }
-            NSArray *reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 1);
-            id highest = SelectHighestRepresentation(reps);
-            if (highest) {
-                objc_setAssociatedObject(playlist, kPlaylistHighestVideoRepKey, highest, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                UpdateRepresentationInfo(highest);
-                return highest;
-            }
-        }
-        if (g_lastHighestVideoRep) {
-            UpdateRepresentationInfo(g_lastHighestVideoRep);
-            return g_lastHighestVideoRep;
+            UpdateRepresentationInfo(highest);
         }
     }
 
@@ -894,6 +907,12 @@ static void SwizzleDashClasses(void) {
         SwizzleBoth(playlistCls, sel_registerName("representationsForTrack:"),
                     (IMP)Hook_Playlist_RepresentationsForTrack,
                     (IMP *)&orig_playlist_representationsForTrack, "@@:q");
+        SwizzleBoth(playlistCls, sel_registerName("allRepresentationsForTrack:"),
+                    (IMP)Hook_Playlist_AllRepresentationsForTrack,
+                    (IMP *)&orig_playlist_allRepresentationsForTrack, "@@:q");
+        SwizzleBoth(playlistCls, sel_registerName("_defaultVideoRepresentation"),
+                    (IMP)Hook_Playlist_DefaultVideoRepresentation,
+                    (IMP *)&orig_playlist_defaultVideoRep, "@@:");
 
         // Prevent disabling high-res representations
         SwizzleBoth(playlistCls, sel_registerName("_disableRepresentationsFromMpd:withComparison:disableMessage:disableCode:"),
@@ -932,6 +951,9 @@ static void SwizzleDashClasses(void) {
         SwizzleBoth(selMetaCls, sel_registerName("initWithSelectedRepresentation:trackType:"),
                     (IMP)Hook_SelMeta_InitWithSelectedRepTrack,
                     (IMP *)&orig_selMeta_initWithSelectedRepTrack, "@@:@q");
+        SwizzleBoth(selMetaCls, sel_registerName("initWithSelectedRepresentation:qualityMetadata:requestMetadata:responseMetadata:trackType:"),
+                    (IMP)Hook_SelMeta_InitWith4Params,
+                    (IMP *)&orig_selMeta_initWith4Params, "@@:@@@@q");
     }
 
     // 5. Hook FNFDashChunkManager _selectFetchRepresentation
