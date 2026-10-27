@@ -20,6 +20,7 @@ NSString * const kInstagramDash1440pStateDidChangeNotification = @"kInstagramDas
 static BOOL g_dash1440pEnabled = YES;
 static BOOL g_isActual1440p = NO;
 static NSString *g_currentQuality = @"1080p";
+static NSString *g_currentResolution = @"";
 static NSString *g_currentRepresentationId = @"ready";
 static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -121,6 +122,13 @@ NSString *InstagramDash1440p_GetCurrentQuality(void) {
     return q;
 }
 
+NSString *InstagramDash1440p_GetCurrentResolution(void) {
+    pthread_mutex_lock(&g_stateMutex);
+    NSString *r = [g_currentResolution copy];
+    pthread_mutex_unlock(&g_stateMutex);
+    return r;
+}
+
 NSString *InstagramDash1440p_GetCurrentRepresentationId(void) {
     pthread_mutex_lock(&g_stateMutex);
     NSString *repId = [g_currentRepresentationId copy];
@@ -134,19 +142,65 @@ NSString *InstagramDash1440p_GetLogFilePath(void) {
 }
 
 // ============================================================================
-// Representation Introspection Helpers
+// Representation Introspection Helpers & Unpacking
 // ============================================================================
+
+static id ExtractRepresentationFromObject(id obj) {
+    if (!obj) return nil;
+
+    // Check if obj itself is a representation
+    if ([obj respondsToSelector:@selector(representationId)] ||
+        [obj respondsToSelector:@selector(videoSize)] ||
+        [obj respondsToSelector:@selector(bandwidth)]) {
+        return obj;
+    }
+
+    // Check selection metadata wrappers
+    SEL selectors[] = {
+        sel_registerName("selectedRepresentation"),
+        sel_registerName("selectedRep"),
+        sel_registerName("representation"),
+        sel_registerName("videoRepresentation")
+    };
+    for (size_t i = 0; i < sizeof(selectors)/sizeof(selectors[0]); i++) {
+        if ([obj respondsToSelector:selectors[i]]) {
+            id inner = ((id (*)(id, SEL))objc_msgSend)(obj, selectors[i]);
+            if (inner && inner != obj) {
+                id extracted = ExtractRepresentationFromObject(inner);
+                if (extracted) return extracted;
+            }
+        }
+    }
+
+    // Safe KVC fallback
+    const char *keys[] = {"selectedRepresentation", "selectedRep", "representation", "videoRepresentation"};
+    for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
+        @try {
+            id inner = [obj valueForKey:[NSString stringWithUTF8String:keys[i]]];
+            if (inner && inner != obj) {
+                id extracted = ExtractRepresentationFromObject(inner);
+                if (extracted) return extracted;
+            }
+        } @catch (NSException *e) {}
+    }
+
+    return obj;
+}
 
 static BOOL IsAudioRepresentation(id rep) {
     if (!rep) return NO;
-    if ([rep respondsToSelector:@selector(isAudio)]) {
-        if (((BOOL (*)(id, SEL))objc_msgSend)(rep, @selector(isAudio))) return YES;
+    id actual = ExtractRepresentationFromObject(rep);
+    if (!actual) actual = rep;
+
+    if ([actual respondsToSelector:@selector(isAudio)]) {
+        if (((BOOL (*)(id, SEL))objc_msgSend)(actual, @selector(isAudio))) return YES;
     }
-    if ([rep respondsToSelector:@selector(track)]) {
-        if (((NSInteger (*)(id, SEL))objc_msgSend)(rep, @selector(track)) == 2) return YES;
+    if ([actual respondsToSelector:@selector(track)]) {
+        NSInteger tr = ((NSInteger (*)(id, SEL))objc_msgSend)(actual, @selector(track));
+        if (tr == 1) return YES; // In FNF, track 1 is Audio, track 0 is Video
     }
-    if ([rep respondsToSelector:@selector(representationId)]) {
-        NSString *repId = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(representationId));
+    if ([actual respondsToSelector:@selector(representationId)]) {
+        NSString *repId = ((NSString *(*)(id, SEL))objc_msgSend)(actual, @selector(representationId));
         if (repId && [repId hasSuffix:@"a"]) return YES;
     }
     return NO;
@@ -154,26 +208,29 @@ static BOOL IsAudioRepresentation(id rep) {
 
 static CGSize GetRepresentationPixelDimensions(id rep) {
     if (!rep) return CGSizeZero;
+    id actual = ExtractRepresentationFromObject(rep);
+    if (!actual) actual = rep;
+
     CGSize sz = CGSizeZero;
-    if ([rep respondsToSelector:@selector(videoSize)]) {
-        sz = ((CGSize (*)(id, SEL))objc_msgSend)(rep, @selector(videoSize));
+    if ([actual respondsToSelector:@selector(videoSize)]) {
+        sz = ((CGSize (*)(id, SEL))objc_msgSend)(actual, @selector(videoSize));
     }
     if (sz.width <= 0.0f || sz.height <= 0.0f) {
-        if ([rep respondsToSelector:@selector(size)]) {
-            sz = ((CGSize (*)(id, SEL))objc_msgSend)(rep, @selector(size));
+        if ([actual respondsToSelector:@selector(size)]) {
+            sz = ((CGSize (*)(id, SEL))objc_msgSend)(actual, @selector(size));
         }
     }
     if (sz.width <= 0.0f || sz.height <= 0.0f) {
         CGFloat w = 0.0f, h = 0.0f;
-        if ([rep respondsToSelector:@selector(videoWidth)]) {
-            w = (CGFloat)((NSInteger (*)(id, SEL))objc_msgSend)(rep, @selector(videoWidth));
-        } else if ([rep respondsToSelector:@selector(width)]) {
-            w = (CGFloat)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(width));
+        if ([actual respondsToSelector:@selector(videoWidth)]) {
+            w = (CGFloat)((NSInteger (*)(id, SEL))objc_msgSend)(actual, @selector(videoWidth));
+        } else if ([actual respondsToSelector:@selector(width)]) {
+            w = (CGFloat)((uint32_t (*)(id, SEL))objc_msgSend)(actual, @selector(width));
         }
-        if ([rep respondsToSelector:@selector(videoHeight)]) {
-            h = (CGFloat)((NSInteger (*)(id, SEL))objc_msgSend)(rep, @selector(videoHeight));
-        } else if ([rep respondsToSelector:@selector(height)]) {
-            h = (CGFloat)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(height));
+        if ([actual respondsToSelector:@selector(videoHeight)]) {
+            h = (CGFloat)((NSInteger (*)(id, SEL))objc_msgSend)(actual, @selector(videoHeight));
+        } else if ([actual respondsToSelector:@selector(height)]) {
+            h = (CGFloat)((uint32_t (*)(id, SEL))objc_msgSend)(actual, @selector(height));
         }
         if (w > 0.0f && h > 0.0f) {
             sz = CGSizeMake(w, h);
@@ -184,23 +241,29 @@ static CGSize GetRepresentationPixelDimensions(id rep) {
 
 static uint64_t GetRepresentationBitrate(id rep) {
     if (!rep) return 0;
-    if ([rep respondsToSelector:@selector(bandwidth)]) {
-        return (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(bandwidth));
+    id actual = ExtractRepresentationFromObject(rep);
+    if (!actual) actual = rep;
+
+    if ([actual respondsToSelector:@selector(bandwidth)]) {
+        return (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(actual, @selector(bandwidth));
     }
-    if ([rep respondsToSelector:@selector(bitrate)]) {
-        return (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(bitrate));
+    if ([actual respondsToSelector:@selector(bitrate)]) {
+        return (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(actual, @selector(bitrate));
     }
     return 0;
 }
 
 static NSString *GetRepresentationId(id rep) {
     if (!rep) return nil;
-    if ([rep respondsToSelector:@selector(representationId)]) {
-        NSString *repId = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(representationId));
+    id actual = ExtractRepresentationFromObject(rep);
+    if (!actual) actual = rep;
+
+    if ([actual respondsToSelector:@selector(representationId)]) {
+        NSString *repId = ((NSString *(*)(id, SEL))objc_msgSend)(actual, @selector(representationId));
         if (repId && repId.length > 0) return repId;
     }
-    if ([rep respondsToSelector:@selector(qualityLabel)]) {
-        NSString *label = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(qualityLabel));
+    if ([actual respondsToSelector:@selector(qualityLabel)]) {
+        NSString *label = ((NSString *(*)(id, SEL))objc_msgSend)(actual, @selector(qualityLabel));
         if (label && label.length > 0) return label;
     }
     return nil;
@@ -212,22 +275,28 @@ static NSString *GetRepresentationId(id rep) {
 
 static void UpdateActiveRepresentation(id rep, BOOL isPrefetch) {
     if (!rep || IsAudioRepresentation(rep)) return;
+    id actual = ExtractRepresentationFromObject(rep);
+    if (!actual || IsAudioRepresentation(actual)) return;
 
-    CGSize sz = GetRepresentationPixelDimensions(rep);
+    CGSize sz = GetRepresentationPixelDimensions(actual);
+    CGFloat minDim = MIN(sz.width, sz.height);
+    CGFloat maxDim = MAX(sz.width, sz.height);
     uint64_t pixels = (uint64_t)(sz.width * sz.height);
-    NSString *repId = GetRepresentationId(rep) ?: @"unknown";
-    uint64_t bw = GetRepresentationBitrate(rep);
+    NSString *repId = GetRepresentationId(actual) ?: @"unknown";
+    uint64_t bw = GetRepresentationBitrate(actual);
 
-    BOOL is1440 = (pixels >= 1440ULL * 2560ULL || sz.width >= 1440.0f || sz.height >= 2560.0f ||
-                   [repId containsString:@"1539525017490074"] || [repId containsString:@"1440"]);
-    BOOL is1080 = (!is1440 && (pixels >= 1080ULL * 1920ULL || sz.width >= 1080.0f || sz.height >= 1920.0f ||
-                   [repId containsString:@"1080"]));
+    BOOL is1440 = (minDim > 1080.0f || maxDim > 1920.0f || pixels > 2200000ULL ||
+                   (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])));
 
-    NSString *quality = is1440 ? @"1440p" : (is1080 ? @"1080p" : [NSString stringWithFormat:@"%.0fp", MIN(sz.width, sz.height)]);
+    BOOL is1080 = (!is1440 && (minDim >= 1000.0f || maxDim >= 1800.0f || pixels >= 1900000ULL ||
+                   (repId && [repId containsString:@"1080"])));
+
+    NSString *quality = is1440 ? @"1440p" : (is1080 ? @"1080p" : [NSString stringWithFormat:@"%.0fp", minDim > 0.0f ? minDim : 1080.0f]);
+    NSString *resolution = (sz.width > 0.0f && sz.height > 0.0f) ? [NSString stringWithFormat:@"%.0fx%.0f", sz.width, sz.height] : (is1440 ? @"1440x2560" : @"1080x1920");
 
     if (isPrefetch) {
-        DashLog(@"[Prefetch Engine] Queued offscreen chunk: %@ (%@, %.0fx%.0f, %llu bps)",
-                quality, repId, sz.width, sz.height, bw);
+        DashLog(@"[Prefetch Engine] Queued offscreen chunk: %@ (%@, %@, %llu bps)",
+                quality, repId, resolution, bw);
         return;
     }
 
@@ -235,17 +304,19 @@ static void UpdateActiveRepresentation(id rep, BOOL isPrefetch) {
     pthread_mutex_lock(&g_stateMutex);
     if (g_isActual1440p != is1440 ||
         ![g_currentQuality isEqualToString:quality] ||
+        ![g_currentResolution isEqualToString:resolution] ||
         ![g_currentRepresentationId isEqualToString:repId]) {
         g_isActual1440p = is1440;
         g_currentQuality = [quality copy];
+        g_currentResolution = [resolution copy];
         g_currentRepresentationId = [repId copy];
         changed = YES;
     }
     pthread_mutex_unlock(&g_stateMutex);
 
     if (changed) {
-        DashLog(@"[Active Playback] Representation locked: %@ (%@, %.0fx%.0f, %llu bps)",
-                quality, repId, sz.width, sz.height, bw);
+        DashLog(@"[Active Playback] Representation locked: %@ (%@, %@, %llu bps)",
+                quality, repId, resolution, bw);
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
         });
@@ -275,14 +346,16 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
         if (!rep || IsAudioRepresentation(rep)) continue;
 
         CGSize sz = GetRepresentationPixelDimensions(rep);
+        CGFloat minDim = MIN(sz.width, sz.height);
+        CGFloat maxDim = MAX(sz.width, sz.height);
         uint64_t pixels = (uint64_t)(sz.width * sz.height);
         uint64_t bw = GetRepresentationBitrate(rep);
         NSString *repId = GetRepresentationId(rep);
 
-        BOOL is1440 = (pixels >= 1440ULL * 2560ULL || sz.width >= 1440.0f || sz.height >= 2560.0f ||
-                       (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"1440"])));
+        BOOL is1440 = (minDim > 1080.0f || maxDim > 1920.0f || pixels > 2200000ULL ||
+                       (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])));
 
-        BOOL is1080 = (!is1440 && (pixels >= 1080ULL * 1920ULL || sz.width >= 1080.0f || sz.height >= 1920.0f ||
+        BOOL is1080 = (!is1440 && (minDim >= 1000.0f || maxDim >= 1800.0f || pixels >= 1900000ULL ||
                        (repId && [repId containsString:@"1080"])));
 
         // 1. Evaluate 1440p pool (strictly prioritize resolution over bitrate inversion)
@@ -314,9 +387,6 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
 
     // Strict hierarchy: 1440p -> 1080p -> Max available
     id chosen = rep1440p ?: rep1080p ?: repHighest ?: representations.firstObject;
-    if (chosen && !IsAudioRepresentation(chosen)) {
-        UpdateActiveRepresentation(chosen, isPrefetch);
-    }
     return chosen;
 }
 
@@ -392,7 +462,7 @@ static id HandleQualitySelection(id self, SEL _cmd, IMP origImp, const char *cla
         @try {
             id playlist = [self valueForKey:@"playlist"];
             if (playlist && [playlist respondsToSelector:@selector(representationsForTrack:)]) {
-                reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 1);
+                reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 0);
             }
         } @catch (NSException *e) {}
     }
@@ -402,7 +472,7 @@ static id HandleQualitySelection(id self, SEL _cmd, IMP origImp, const char *cla
         if (ivar) {
             id playlist = object_getIvar(self, ivar);
             if (playlist && [playlist respondsToSelector:@selector(representationsForTrack:)]) {
-                reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 1);
+                reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 0);
             }
         }
     }
@@ -485,20 +555,40 @@ static NSArray * Hook_PruneQualitiesNoOp(id self, SEL _cmd, NSArray *qualities) 
     return qualities;
 }
 
+// Hook for FNFDashPlaylist representationsForTrack:
+static NSArray * (*orig_playlist_representationsForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
+
+static NSArray * Hook_Playlist_RepresentationsForTrack(id self, SEL _cmd, NSInteger track) {
+    NSArray *origReps = nil;
+    if (orig_playlist_representationsForTrack) {
+        origReps = orig_playlist_representationsForTrack(self, _cmd, track);
+    }
+    if (track != 0 || !InstagramDash1440p_IsEnabled() || !origReps || ![origReps isKindOfClass:[NSArray class]] || origReps.count <= 1) {
+        return origReps;
+    }
+
+    id chosen = SelectTargetRepresentation(origReps, YES);
+    if (chosen) {
+        DashLog(@"[FNFDashPlaylist] representationsForTrack:0 filtered to target quality: %@", chosen);
+        return @[ chosen ];
+    }
+    return origReps;
+}
+
 // Hook for FNFDashPlaylist defaultRepresentationForTrack:
 static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
 
 static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
     DashLog(@"[FNFDashPlaylist] defaultRepresentationForTrack:%ld invoked", (long)track);
-    if (track == 1 && InstagramDash1440p_IsEnabled()) {
+    if (track == 0 && InstagramDash1440p_IsEnabled()) {
         NSArray *reps = nil;
         if ([self respondsToSelector:@selector(representationsForTrack:)]) {
-            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), 1);
+            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), 0);
         }
         if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
             id chosen = SelectTargetRepresentation(reps, YES);
             if (chosen) {
-                DashLog(@"[FNFDashPlaylist] defaultRepresentationForTrack forced: %@", chosen);
+                DashLog(@"[FNFDashPlaylist] defaultRepresentationForTrack:0 (Video) forced: %@", chosen);
                 return chosen;
             }
         }
@@ -523,13 +613,20 @@ static void (*orig_qualityProvider_videoQualitySelected)(id self, SEL _cmd, id r
 
 static void Hook_QualityProvider_VideoQualitySelected(id self, SEL _cmd, id rep, id meta, NSInteger track) {
     DashLog(@"[IGFNFSelectedQualityProvider] videoQualitySelected: track=%ld rep=%@", (long)track, rep);
-    if (track == 1 && rep && !IsAudioRepresentation(rep)) {
-        BOOL isIntentional = YES;
-        if (meta && [meta respondsToSelector:@selector(isIntentional)]) {
-            isIntentional = ((BOOL (*)(id, SEL))objc_msgSend)(meta, @selector(isIntentional));
-        }
-        if (isIntentional) {
-            UpdateActiveRepresentation(rep, NO);
+    if (track == 0 && rep) {
+        id actualRep = ExtractRepresentationFromObject(rep);
+        if (actualRep && !IsAudioRepresentation(actualRep)) {
+            BOOL isIntentional = YES;
+            if (meta && [meta respondsToSelector:@selector(isIntentional)]) {
+                isIntentional = ((BOOL (*)(id, SEL))objc_msgSend)(meta, @selector(isIntentional));
+            }
+            if (isIntentional) {
+                DashLog(@"[Active Playback] Intentional video representation selected: %@", actualRep);
+                UpdateActiveRepresentation(actualRep, NO);
+            } else {
+                DashLog(@"[Prefetch Engine] Offscreen background prefetch video representation selected: %@", actualRep);
+                UpdateActiveRepresentation(actualRep, YES);
+            }
         }
     }
     if (orig_qualityProvider_videoQualitySelected) {
@@ -541,9 +638,8 @@ static void (*orig_qualityProvider_setVideoRep)(id self, SEL _cmd, id rep) = NUL
 
 static void Hook_QualityProvider_SetVideoRep(id self, SEL _cmd, id rep) {
     DashLog(@"[IGFNFSelectedQualityProvider] setVideoSelectedQualityRepresentation: %@", rep);
-    if (rep && !IsAudioRepresentation(rep)) {
-        UpdateActiveRepresentation(rep, NO);
-    }
+    // Note: Do NOT call UpdateActiveRepresentation here to prevent background prefetchers
+    // from overwriting the currently playing Reel's badge.
     if (orig_qualityProvider_setVideoRep) {
         orig_qualityProvider_setVideoRep(self, _cmd, rep);
     }
@@ -570,6 +666,8 @@ static void SwizzleDashClasses(void) {
     Class playlistCls = objc_getClass("FNFDashPlaylist");
     if (playlistCls) {
         LogClassMethods(playlistCls);
+        SafeSwizzleMethod(playlistCls, sel_registerName("representationsForTrack:"),
+                          (IMP)Hook_Playlist_RepresentationsForTrack, (IMP *)&orig_playlist_representationsForTrack);
         SafeSwizzleMethod(playlistCls, sel_registerName("defaultRepresentationForTrack:"),
                           (IMP)Hook_Playlist_DefaultRepresentationForTrack, (IMP *)&orig_playlist_defaultRepresentationForTrack);
     } else {

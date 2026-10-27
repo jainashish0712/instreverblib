@@ -22,6 +22,7 @@ BOOL InstagramDash1440p_ToggleEnabled(void);
 // Real-time telemetry
 BOOL InstagramDash1440p_IsActual1440p(void);
 NSString *InstagramDash1440p_GetCurrentQuality(void);
+NSString *InstagramDash1440p_GetCurrentResolution(void);
 NSString *InstagramDash1440p_GetCurrentRepresentationId(void);
 NSString *InstagramDash1440p_GetLogFilePath(void);
 

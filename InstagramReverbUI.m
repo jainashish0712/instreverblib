@@ -1071,15 +1071,22 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 - (void)updateAppearance {
     BOOL isEnabled = InstagramDash1440p_IsEnabled();
     NSString *quality = InstagramDash1440p_GetCurrentQuality() ?: @"1080p";
+    NSString *resolution = InstagramDash1440p_GetCurrentResolution() ?: @"";
     NSString *repId = InstagramDash1440p_GetCurrentRepresentationId() ?: @"ready";
     BOOL is1440 = InstagramDash1440p_IsActual1440p();
 
-    NSString *text = isEnabled ? [NSString stringWithFormat:@"%@: %@", quality, repId]
-                               : [NSString stringWithFormat:@"OFF (%@)", quality];
+    NSString *text = nil;
+    if (!isEnabled) {
+        text = [NSString stringWithFormat:@"OFF (%@)", quality];
+    } else if (resolution.length > 0 && ![repId isEqualToString:@"ready"]) {
+        text = [NSString stringWithFormat:@"%@ (%@): %@", quality, resolution, repId];
+    } else {
+        text = [NSString stringWithFormat:@"%@: %@", quality, repId];
+    }
     self.titleLabel.text = text;
 
-    CGSize fit = [self.titleLabel sizeThatFits:CGSizeMake(320.0f, 20.0f)];
-    CGFloat targetWidth = MAX(110.0f, MIN(320.0f, fit.width + 26.0f));
+    CGSize fit = [self.titleLabel sizeThatFits:CGSizeMake(340.0f, 20.0f)];
+    CGFloat targetWidth = MAX(120.0f, MIN(340.0f, fit.width + 26.0f));
 
     CGRect f = self.frame;
     f.size.width = targetWidth;
