@@ -376,8 +376,15 @@ def test_file_integrity():
 
     assert "InstagramDash1440p_Init" in h_dash
     assert "InstagramDash1440p_IsActive" in h_dash
+    assert "InstagramDash1440p_IsActual1440p" in h_dash
+    assert "InstagramDash1440p_GetCurrentQuality" in h_dash
+    assert "InstagramDash1440p_GetCurrentFilename" in h_dash
     assert "InstagramDash1440p_Init" in m_dash
     assert "InstagramDash1440p_IsActive" in m_dash
+    assert "InstagramDash1440p_IsActual1440p" in m_dash
+    assert "InstagramDash1440p_GetCurrentQuality" in m_dash
+    assert "InstagramDash1440p_GetCurrentFilename" in m_dash
+    assert "InstagramDash1440pModal" in m_ui
     assert "SelectHighestRepresentation" in m_dash
     assert "Hook_ABRPlayerSize_SelectQualityFromReps" in m_dash
     assert "Hook_ABR_SelectQualityFromReps" in m_dash

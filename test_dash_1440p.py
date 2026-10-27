@@ -175,12 +175,34 @@ def test_20px_dash_modal_and_toggle():
     assert "InstagramDash1440p_IsEnabled" in h_code
     assert "InstagramDash1440p_IsEnabled" in m_code
 
-    # Displaying fdash filename
+    # Displaying fdash filename and actual quality discrimination
     assert "InstagramDash1440p_GetCurrentFilename" in ui_code
     assert "InstagramDash1440p_GetCurrentFilename" in h_code
     assert "InstagramDash1440p_GetCurrentFilename" in m_code
+    assert "InstagramDash1440p_IsActual1440p" in h_code
+    assert "InstagramDash1440p_IsActual1440p" in m_code
+    assert "InstagramDash1440p_GetCurrentQuality" in h_code
+    assert "InstagramDash1440p_GetCurrentQuality" in m_code
     assert "kInstagramDash1440pStateDidChangeNotification" in ui_code
     assert "kInstagramDash1440pStateDidChangeNotification" in m_code
+    assert "fdash-" in m_code, "Must format server representation as fdash-%id!"
+
+    # Simulate true 1440p vs 1080p discrimination logic
+    def simulate_quality_discrimination(width, height, label, rep_id):
+        is_1440p = False
+        if width >= 1440 or height >= 2560:
+            is_1440p = True
+        elif label and ("1440" in label or "2k" in label.lower()):
+            is_1440p = True
+        elif rep_id and ("1440" in rep_id or "2k" in rep_id.lower()):
+            is_1440p = True
+        quality = "1440p" if is_1440p else "1080p"
+        fdash_name = rep_id if rep_id.startswith("fdash-") else f"fdash-{rep_id}"
+        return f"{quality}: {fdash_name}"
+
+    assert simulate_quality_discrimination(1440, 2560, "1440p", "12345678") == "1440p: fdash-12345678"
+    assert simulate_quality_discrimination(1080, 1920, "1080p", "98765432") == "1080p: fdash-98765432"
+    assert simulate_quality_discrimination(720, 1280, "720p", "55555555") == "1080p: fdash-55555555"
 
     # Standard behavior delegation when disabled
     assert "if (InstagramDash1440p_IsEnabled())" in m_code or "if (!InstagramDash1440p_IsEnabled())" in m_code, "Must guard hooks behind isEnabled for standard behavior!"

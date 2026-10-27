@@ -1052,13 +1052,21 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     return CGRectContainsPoint(touchArea, point);
 }
 
-- (void)updateAppearanceWithFilename:(NSString *)filename isEnabled:(BOOL)isEnabled {
-    NSString *cleanName = filename ?: @"Ready";
-    NSString *text = isEnabled ? [NSString stringWithFormat:@"1440p: %@", cleanName] : [NSString stringWithFormat:@"STD: %@", cleanName];
+- (void)updateAppearance {
+    BOOL isEnabled = InstagramDash1440p_IsEnabled();
+    NSString *quality = InstagramDash1440p_GetCurrentQuality() ?: @"1080p";
+    NSString *cleanName = InstagramDash1440p_GetCurrentFilename() ?: @"fdash-ready";
+
+    NSString *text;
+    if (isEnabled) {
+        text = [NSString stringWithFormat:@"%@: %@", quality, cleanName];
+    } else {
+        text = [NSString stringWithFormat:@"STD (%@): %@", quality, cleanName];
+    }
     self.titleLabel.text = text;
 
-    CGSize fit = [self.titleLabel sizeThatFits:CGSizeMake(260.0f, 20.0f)];
-    CGFloat targetWidth = MAX(110.0f, MIN(260.0f, fit.width + 26.0f));
+    CGSize fit = [self.titleLabel sizeThatFits:CGSizeMake(320.0f, 20.0f)];
+    CGFloat targetWidth = MAX(120.0f, MIN(320.0f, fit.width + 26.0f));
 
     CGRect f = self.frame;
     f.size.width = targetWidth;
@@ -1067,9 +1075,15 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     self.titleLabel.frame = CGRectMake(17.0f, 0.0f, targetWidth - 23.0f, 20.0f);
 
     if (isEnabled) {
-        // Active 1440p state: Vibrant Cyan
-        self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.85f].CGColor;
-        self.statusDot.backgroundColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
+        if ([quality isEqualToString:@"1440p"]) {
+            // Actual 1440p stream: Vibrant Cyan
+            self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.90f].CGColor;
+            self.statusDot.backgroundColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
+        } else {
+            // Actual 1080p stream: Bright Emerald Green
+            self.layer.borderColor = [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:0.85f].CGColor;
+            self.statusDot.backgroundColor = [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:1.0f];
+        }
         self.titleLabel.textColor = [UIColor whiteColor];
     } else {
         // Disabled standard behavior state: Translucent grey
@@ -1079,12 +1093,16 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     }
 }
 
+- (void)updateAppearanceWithFilename:(NSString *)filename isEnabled:(BOOL)isEnabled {
+    [self updateAppearance];
+}
+
 - (void)handleTap:(UITapGestureRecognizer *)tap {
     UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [gen impactOccurred];
 
-    BOOL newState = InstagramDash1440p_ToggleEnabled();
-    [self updateAppearanceWithFilename:InstagramDash1440p_GetCurrentFilename() isEnabled:newState];
+    InstagramDash1440p_ToggleEnabled();
+    [self updateAppearance];
 
     [UIView animateWithDuration:0.10 animations:^{
         self.transform = CGAffineTransformMakeScale(0.92f, 0.92f);
@@ -1113,8 +1131,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
 - (void)onDashStateChanged:(NSNotification *)note {
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self updateAppearanceWithFilename:InstagramDash1440p_GetCurrentFilename()
-                                 isEnabled:InstagramDash1440p_IsEnabled()];
+        [self updateAppearance];
     });
 }
 
