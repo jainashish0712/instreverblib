@@ -1070,16 +1070,13 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
 - (void)updateAppearance {
     BOOL isEnabled = InstagramDash1440p_IsEnabled();
-    NSString *quality = InstagramDash1440p_GetCurrentQuality() ?: @"1080p";
-    NSString *resolution = InstagramDash1440p_GetCurrentResolution() ?: @"";
+    NSString *quality = InstagramDash1440p_GetCurrentQuality() ?: @"1440p";
     NSString *repId = InstagramDash1440p_GetCurrentRepresentationId() ?: @"ready";
     BOOL is1440 = InstagramDash1440p_IsActual1440p();
 
     NSString *text = nil;
     if (!isEnabled) {
         text = [NSString stringWithFormat:@"OFF (%@)", quality];
-    } else if (resolution.length > 0 && ![repId isEqualToString:@"ready"]) {
-        text = [NSString stringWithFormat:@"%@ (%@): %@", quality, resolution, repId];
     } else {
         text = [NSString stringWithFormat:@"%@: %@", quality, repId];
     }
@@ -1095,12 +1092,12 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     self.titleLabel.frame = CGRectMake(17.0f, 0.0f, targetWidth - 23.0f, 20.0f);
 
     if (isEnabled) {
-        if (is1440 || [quality isEqualToString:@"1440p"]) {
-            // Vibrant Cyan for 1440p
+        if (is1440) {
+            // Vibrant Cyan for active 1440p playback
             self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.90f].CGColor;
             self.statusDot.backgroundColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
         } else {
-            // Emerald Green for 1080p
+            // Emerald Green for 1080p fallback / ready state
             self.layer.borderColor = [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:0.85f].CGColor;
             self.statusDot.backgroundColor = [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:1.0f];
         }

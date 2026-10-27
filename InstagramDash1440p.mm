@@ -19,7 +19,7 @@ NSString * const kInstagramDash1440pStateDidChangeNotification = @"kInstagramDas
 
 static BOOL g_dash1440pEnabled = YES;
 static BOOL g_isActual1440p = NO;
-static NSString *g_currentQuality = @"1080p";
+static NSString *g_currentQuality = @"1440p";
 static NSString *g_currentResolution = @"";
 static NSString *g_currentRepresentationId = @"ready";
 static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
@@ -269,6 +269,18 @@ static NSString *GetRepresentationId(id rep) {
     return nil;
 }
 
+static NSString *GetRepresentationEncodingTag(id rep) {
+    if (!rep) return nil;
+    id actual = ExtractRepresentationFromObject(rep);
+    if (!actual) actual = rep;
+
+    if ([actual respondsToSelector:@selector(encodingTag)]) {
+        NSString *tag = ((NSString *(*)(id, SEL))objc_msgSend)(actual, @selector(encodingTag));
+        if (tag && tag.length > 0) return tag;
+    }
+    return nil;
+}
+
 // ============================================================================
 // State & Telemetry Updates
 // ============================================================================
@@ -283,13 +295,16 @@ static void UpdateActiveRepresentation(id rep, BOOL isPrefetch) {
     CGFloat maxDim = MAX(sz.width, sz.height);
     uint64_t pixels = (uint64_t)(sz.width * sz.height);
     NSString *repId = GetRepresentationId(actual) ?: @"unknown";
+    NSString *encodingTag = GetRepresentationEncodingTag(actual);
     uint64_t bw = GetRepresentationBitrate(actual);
 
     BOOL is1440 = (minDim > 1080.0f || maxDim > 1920.0f || pixels > 2200000ULL ||
-                   (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])));
+                   (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])) ||
+                   (encodingTag && ([encodingTag containsString:@"1440"] || [encodingTag containsString:@"2k"])));
 
     BOOL is1080 = (!is1440 && (minDim >= 1000.0f || maxDim >= 1800.0f || pixels >= 1900000ULL ||
-                   (repId && [repId containsString:@"1080"])));
+                   (repId && [repId containsString:@"1080"]) ||
+                   (encodingTag && [encodingTag containsString:@"1080"])));
 
     NSString *quality = is1440 ? @"1440p" : (is1080 ? @"1080p" : [NSString stringWithFormat:@"%.0fp", minDim > 0.0f ? minDim : 1080.0f]);
     NSString *resolution = (sz.width > 0.0f && sz.height > 0.0f) ? [NSString stringWithFormat:@"%.0fx%.0f", sz.width, sz.height] : (is1440 ? @"1440x2560" : @"1080x1920");
@@ -351,12 +366,18 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
         uint64_t pixels = (uint64_t)(sz.width * sz.height);
         uint64_t bw = GetRepresentationBitrate(rep);
         NSString *repId = GetRepresentationId(rep);
+        NSString *encodingTag = GetRepresentationEncodingTag(rep);
 
         BOOL is1440 = (minDim > 1080.0f || maxDim > 1920.0f || pixels > 2200000ULL ||
-                       (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])));
+                       (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])) ||
+                       (encodingTag && ([encodingTag containsString:@"1440"] || [encodingTag containsString:@"2k"])));
 
         BOOL is1080 = (!is1440 && (minDim >= 1000.0f || maxDim >= 1800.0f || pixels >= 1900000ULL ||
-                       (repId && [repId containsString:@"1080"])));
+                       (repId && [repId containsString:@"1080"]) ||
+                       (encodingTag && [encodingTag containsString:@"1080"])));
+
+        DashLog(@"[Quality Selector] Candidate rep: %@ (%.0fx%.0f, %llu bps, is1440=%d, is1080=%d)",
+                repId, sz.width, sz.height, bw, is1440, is1080);
 
         // 1. Evaluate 1440p pool (strictly prioritize resolution over bitrate inversion)
         if (is1440) {
@@ -387,6 +408,12 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
 
     // Strict hierarchy: 1440p -> 1080p -> Max available
     id chosen = rep1440p ?: rep1080p ?: repHighest ?: representations.firstObject;
+    if (chosen) {
+        NSString *chosenId = GetRepresentationId(chosen);
+        CGSize chosenSz = GetRepresentationPixelDimensions(chosen);
+        uint64_t chosenBw = GetRepresentationBitrate(chosen);
+        DashLog(@"[Quality Selector] -> Target chosen: %@ (%.0fx%.0f, %llu bps)", chosenId, chosenSz.width, chosenSz.height, chosenBw);
+    }
     return chosen;
 }
 
@@ -575,6 +602,26 @@ static NSArray * Hook_Playlist_RepresentationsForTrack(id self, SEL _cmd, NSInte
     return origReps;
 }
 
+// Hook for FNFDashPlaylist _representationsForVideoTrack
+static NSArray * (*orig_playlist_representationsForVideoTrack)(id self, SEL _cmd) = NULL;
+
+static NSArray * Hook_Playlist_RepresentationsForVideoTrack(id self, SEL _cmd) {
+    NSArray *origReps = nil;
+    if (orig_playlist_representationsForVideoTrack) {
+        origReps = orig_playlist_representationsForVideoTrack(self, _cmd);
+    }
+    if (!InstagramDash1440p_IsEnabled() || !origReps || ![origReps isKindOfClass:[NSArray class]] || origReps.count <= 1) {
+        return origReps;
+    }
+
+    id chosen = SelectTargetRepresentation(origReps, YES);
+    if (chosen) {
+        DashLog(@"[FNFDashPlaylist] _representationsForVideoTrack filtered to target quality: %@", chosen);
+        return @[ chosen ];
+    }
+    return origReps;
+}
+
 // Hook for FNFDashPlaylist defaultRepresentationForTrack:
 static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
 
@@ -616,17 +663,7 @@ static void Hook_QualityProvider_VideoQualitySelected(id self, SEL _cmd, id rep,
     if (track == 0 && rep) {
         id actualRep = ExtractRepresentationFromObject(rep);
         if (actualRep && !IsAudioRepresentation(actualRep)) {
-            BOOL isIntentional = YES;
-            if (meta && [meta respondsToSelector:@selector(isIntentional)]) {
-                isIntentional = ((BOOL (*)(id, SEL))objc_msgSend)(meta, @selector(isIntentional));
-            }
-            if (isIntentional) {
-                DashLog(@"[Active Playback] Intentional video representation selected: %@", actualRep);
-                UpdateActiveRepresentation(actualRep, NO);
-            } else {
-                DashLog(@"[Prefetch Engine] Offscreen background prefetch video representation selected: %@", actualRep);
-                UpdateActiveRepresentation(actualRep, YES);
-            }
+            UpdateActiveRepresentation(actualRep, NO);
         }
     }
     if (orig_qualityProvider_videoQualitySelected) {
@@ -638,8 +675,12 @@ static void (*orig_qualityProvider_setVideoRep)(id self, SEL _cmd, id rep) = NUL
 
 static void Hook_QualityProvider_SetVideoRep(id self, SEL _cmd, id rep) {
     DashLog(@"[IGFNFSelectedQualityProvider] setVideoSelectedQualityRepresentation: %@", rep);
-    // Note: Do NOT call UpdateActiveRepresentation here to prevent background prefetchers
-    // from overwriting the currently playing Reel's badge.
+    if (rep) {
+        id actualRep = ExtractRepresentationFromObject(rep);
+        if (actualRep && !IsAudioRepresentation(actualRep)) {
+            UpdateActiveRepresentation(actualRep, NO);
+        }
+    }
     if (orig_qualityProvider_setVideoRep) {
         orig_qualityProvider_setVideoRep(self, _cmd, rep);
     }
@@ -668,6 +709,8 @@ static void SwizzleDashClasses(void) {
         LogClassMethods(playlistCls);
         SafeSwizzleMethod(playlistCls, sel_registerName("representationsForTrack:"),
                           (IMP)Hook_Playlist_RepresentationsForTrack, (IMP *)&orig_playlist_representationsForTrack);
+        SafeSwizzleMethod(playlistCls, sel_registerName("_representationsForVideoTrack"),
+                          (IMP)Hook_Playlist_RepresentationsForVideoTrack, (IMP *)&orig_playlist_representationsForVideoTrack);
         SafeSwizzleMethod(playlistCls, sel_registerName("defaultRepresentationForTrack:"),
                           (IMP)Hook_Playlist_DefaultRepresentationForTrack, (IMP *)&orig_playlist_defaultRepresentationForTrack);
     } else {
