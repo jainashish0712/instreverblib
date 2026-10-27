@@ -153,15 +153,42 @@ def test_build_system_synchronization():
 
     print("   -> PASS: Header, DSP entry point, build.sh, and Makefile 100% synchronized.")
 
-def test_ui_isolation_no_16px_button():
-    print("[5/5] Testing User Constraint (No 16px Toggle Button Added Yet)...")
+def test_20px_dash_modal_and_toggle():
+    print("[5/5] Testing 20px 1440p DASH Filename Modal & Runtime Toggle...")
     with open(os.path.join(BASE_DIR, "InstagramReverbUI.m"), "r", encoding="utf-8") as f:
         ui_code = f.read()
+    with open(os.path.join(BASE_DIR, "InstagramDash1440p.h"), "r", encoding="utf-8") as f:
+        h_code = f.read()
+    with open(os.path.join(BASE_DIR, "InstagramDash1440p.m"), "r", encoding="utf-8") as f:
+        m_code = f.read()
 
-    # Verify user instruction: "dont do 16px button yet"
-    assert "wifiToggleBtn" not in ui_code, "16px button must NOT be in UI yet per user instruction!"
+    # Modal class and 20px height
+    assert "@interface InstagramDash1440pModal : UIView" in ui_code, "Missing InstagramDash1440pModal class!"
+    assert "modalH = 20.0f;" in ui_code, "Modal height must be strictly 20px!"
+    assert "f.size.height = 20.0f;" in ui_code, "Modal height must remain strictly 20px on resize!"
 
-    print("   -> PASS: Strict adherence confirmed: No 16px button added to UI yet.")
+    # Tap gesture toggling standard behavior
+    assert "handleTap:" in ui_code, "Missing tap handler on modal!"
+    assert "InstagramDash1440p_ToggleEnabled()" in ui_code, "Tap must call InstagramDash1440p_ToggleEnabled()!"
+    assert "InstagramDash1440p_ToggleEnabled" in h_code
+    assert "InstagramDash1440p_ToggleEnabled" in m_code
+    assert "InstagramDash1440p_IsEnabled" in h_code
+    assert "InstagramDash1440p_IsEnabled" in m_code
+
+    # Displaying fdash filename
+    assert "InstagramDash1440p_GetCurrentFilename" in ui_code
+    assert "InstagramDash1440p_GetCurrentFilename" in h_code
+    assert "InstagramDash1440p_GetCurrentFilename" in m_code
+    assert "kInstagramDash1440pStateDidChangeNotification" in ui_code
+    assert "kInstagramDash1440pStateDidChangeNotification" in m_code
+
+    # Standard behavior delegation when disabled
+    assert "if (InstagramDash1440p_IsEnabled())" in m_code or "if (!InstagramDash1440p_IsEnabled())" in m_code, "Must guard hooks behind isEnabled for standard behavior!"
+
+    # Old 16px wifiToggleBtn must not exist
+    assert "wifiToggleBtn" not in ui_code
+
+    print("   -> PASS: 20px DASH modal with fdash filename and standard behavior toggle verified.")
 
 if __name__ == "__main__":
     print("==================================================================")
@@ -171,7 +198,7 @@ if __name__ == "__main__":
     test_source_code_hooks_and_classes()
     test_pruning_bypass_and_aoc()
     test_build_system_synchronization()
-    test_ui_isolation_no_16px_button()
+    test_20px_dash_modal_and_toggle()
     print("==================================================================")
     print("    ALL 5 DASH 1440p CHECKS PASSED: 1440p STREAMING LOCKED!       ")
     print("==================================================================")

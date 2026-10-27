@@ -9,6 +9,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import "InstagramReverbUI.h"
 #import "InstagramReverb.h"
+#import "InstagramDash1440p.h"
 
 // Accent Color: Vibrant Neon Green #1DB954 for maximum visibility and contrast
 #define ACCENT_COLOR [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:1.0f]
@@ -979,12 +980,154 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 @end
 
 // ============================================================================
+// 20px 1440p DASH Filename Modal & Runtime Toggle Badge
+// ============================================================================
+@interface InstagramDash1440pModal : UIView
+
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UIView *statusDot;
+@property (nonatomic, strong) UIVisualEffectView *blurView;
+
+- (void)updateAppearanceWithFilename:(NSString *)filename isEnabled:(BOOL)isEnabled;
+
+@end
+
+@implementation InstagramDash1440pModal
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.layer.cornerRadius = 10.0f; // Pill shape for 20px height
+        self.layer.masksToBounds = YES;
+        self.layer.borderWidth = 1.0f;
+        self.backgroundColor = [UIColor clearColor];
+
+        UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
+        _blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
+        _blurView.frame = self.bounds;
+        _blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _blurView.userInteractionEnabled = NO;
+        [self addSubview:_blurView];
+
+        // Tiny 5px status indicator dot
+        _statusDot = [[UIView alloc] initWithFrame:CGRectMake(8.0f, 7.5f, 5.0f, 5.0f)];
+        _statusDot.layer.cornerRadius = 2.5f;
+        _statusDot.layer.masksToBounds = YES;
+        _statusDot.userInteractionEnabled = NO;
+        [self addSubview:_statusDot];
+
+        // Filename & Status Text Label
+        _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(17.0f, 0.0f, frame.size.width - 23.0f, 20.0f)];
+        _titleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightBold];
+        _titleLabel.textColor = [UIColor whiteColor];
+        _titleLabel.textAlignment = NSTextAlignmentLeft;
+        _titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        _titleLabel.userInteractionEnabled = NO;
+        [self addSubview:_titleLabel];
+
+        // Tap gesture to toggle 1440p on/off
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
+        [self addGestureRecognizer:tap];
+
+        // Pan gesture to drag modal anywhere on screen
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        [self addGestureRecognizer:pan];
+
+        // Subscribe to DASH state change notifications
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onDashStateChanged:)
+                                                     name:kInstagramDash1440pStateDidChangeNotification
+                                                   object:nil];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    // Expand touch bounds vertically to 40pt for effortless tapping on mobile touchscreens
+    CGRect touchArea = CGRectInset(self.bounds, -6.0f, -10.0f);
+    return CGRectContainsPoint(touchArea, point);
+}
+
+- (void)updateAppearanceWithFilename:(NSString *)filename isEnabled:(BOOL)isEnabled {
+    NSString *cleanName = filename ?: @"Ready";
+    NSString *text = isEnabled ? [NSString stringWithFormat:@"1440p: %@", cleanName] : [NSString stringWithFormat:@"STD: %@", cleanName];
+    self.titleLabel.text = text;
+
+    CGSize fit = [self.titleLabel sizeThatFits:CGSizeMake(260.0f, 20.0f)];
+    CGFloat targetWidth = MAX(110.0f, MIN(260.0f, fit.width + 26.0f));
+
+    CGRect f = self.frame;
+    f.size.width = targetWidth;
+    f.size.height = 20.0f; // Strictly 20px modal height
+    self.frame = f;
+    self.titleLabel.frame = CGRectMake(17.0f, 0.0f, targetWidth - 23.0f, 20.0f);
+
+    if (isEnabled) {
+        // Active 1440p state: Vibrant Cyan
+        self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.85f].CGColor;
+        self.statusDot.backgroundColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
+        self.titleLabel.textColor = [UIColor whiteColor];
+    } else {
+        // Disabled standard behavior state: Translucent grey
+        self.layer.borderColor = [UIColor colorWithWhite:0.6f alpha:0.45f].CGColor;
+        self.statusDot.backgroundColor = [UIColor colorWithWhite:0.5f alpha:0.6f];
+        self.titleLabel.textColor = [UIColor colorWithWhite:0.75f alpha:1.0f];
+    }
+}
+
+- (void)handleTap:(UITapGestureRecognizer *)tap {
+    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [gen impactOccurred];
+
+    BOOL newState = InstagramDash1440p_ToggleEnabled();
+    [self updateAppearanceWithFilename:InstagramDash1440p_GetCurrentFilename() isEnabled:newState];
+
+    [UIView animateWithDuration:0.10 animations:^{
+        self.transform = CGAffineTransformMakeScale(0.92f, 0.92f);
+    } completion:^(BOOL finished) {
+        [UIView animateWithDuration:0.15 animations:^{
+            self.transform = CGAffineTransformIdentity;
+        }];
+    }];
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)pan {
+    CGPoint translation = [pan translationInView:self.superview];
+    CGPoint newCenter = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
+
+    CGFloat halfW = self.bounds.size.width / 2.0f;
+    CGFloat halfH = self.bounds.size.height / 2.0f;
+    CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+    CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+
+    newCenter.x = MAX(halfW + 6.0f, MIN(screenW - halfW - 6.0f, newCenter.x));
+    newCenter.y = MAX(halfH + 30.0f, MIN(screenH - halfH - 30.0f, newCenter.y));
+
+    self.center = newCenter;
+    [pan setTranslation:CGPointZero inView:self.superview];
+}
+
+- (void)onDashStateChanged:(NSNotification *)note {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self updateAppearanceWithFilename:InstagramDash1440p_GetCurrentFilename()
+                                 isEnabled:InstagramDash1440p_IsEnabled()];
+    });
+}
+
+@end
+
+// ============================================================================
 // HUD Manager Singleton
 // ============================================================================
 @interface InstagramReverbHUDManager ()
 @property (nonatomic, strong) InstagramReverbOverlayWindow *overlayWindow;
 @property (nonatomic, strong) InstagramReverbFloatingButton *floatingButton;
 @property (nonatomic, strong) InstagramReverbVolumeBar *volumeBar;
+@property (nonatomic, strong) InstagramDash1440pModal *dashModal;
 @property (nonatomic, strong) InstagramReverbHUDView *hudView;
 @property (nonatomic, assign) BOOL isHUDVisible;
 @end
@@ -1086,6 +1229,22 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         } else if (!self.volumeBar.superview) {
             [container addSubview:self.volumeBar];
             [self.volumeBar revealAndResetTimer];
+        }
+
+        // Small 20px 1440p DASH Reel Filename Modal & Runtime Toggle
+        if (!self.dashModal) {
+            CGFloat modalH = 20.0f;
+            CGFloat modalW = 140.0f;
+            CGFloat initialX = (container.bounds.size.width - modalW) / 2.0f;
+            CGFloat initialY = 52.0f;
+            self.dashModal = [[InstagramDash1440pModal alloc] initWithFrame:CGRectMake(initialX, initialY, modalW, modalH)];
+            [container addSubview:self.dashModal];
+            [self.dashModal updateAppearanceWithFilename:InstagramDash1440p_GetCurrentFilename()
+                                               isEnabled:InstagramDash1440p_IsEnabled()];
+        } else if (!self.dashModal.superview) {
+            [container addSubview:self.dashModal];
+            [self.dashModal updateAppearanceWithFilename:InstagramDash1440p_GetCurrentFilename()
+                                               isEnabled:InstagramDash1440p_IsEnabled()];
         }
 
         static BOOL sGestureAdded = NO;

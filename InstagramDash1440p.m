@@ -7,6 +7,7 @@
 // 2. Disabling representation pruning in FNFDashPlayerSizePruner & FNFDashPlayerQualityPruner.
 // 3. Ensuring 1440p / maximum bitrate representation selection in FNFDashABRPlayerSizeQualitySelector.
 // 4. Bypassing Avoid-On-Cell (AOC) representation restrictions.
+// 5. Supporting runtime toggle via 20px modal for standard vs 1440p behavior.
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -17,6 +18,75 @@
 #import "InstagramDash1440p.h"
 
 #define DashLog(fmt, ...) NSLog(@"[InstagramDash1440p] " fmt, ##__VA_ARGS__)
+
+NSString * const kInstagramDash1440pStateDidChangeNotification = @"kInstagramDash1440pStateDidChangeNotification";
+
+static BOOL g_dash1440pEnabled = YES;
+static NSString *g_currentFdashFilename = @"Ready";
+static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
+
+BOOL InstagramDash1440p_IsEnabled(void) {
+    return g_dash1440pEnabled;
+}
+
+void InstagramDash1440p_SetEnabled(BOOL enabled) {
+    pthread_mutex_lock(&g_stateMutex);
+    g_dash1440pEnabled = enabled;
+    pthread_mutex_unlock(&g_stateMutex);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
+    });
+}
+
+BOOL InstagramDash1440p_ToggleEnabled(void) {
+    pthread_mutex_lock(&g_stateMutex);
+    g_dash1440pEnabled = !g_dash1440pEnabled;
+    BOOL newState = g_dash1440pEnabled;
+    pthread_mutex_unlock(&g_stateMutex);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
+    });
+    return newState;
+}
+
+NSString *InstagramDash1440p_GetCurrentFilename(void) {
+    pthread_mutex_lock(&g_stateMutex);
+    NSString *copy = [g_currentFdashFilename copy];
+    pthread_mutex_unlock(&g_stateMutex);
+    return copy;
+}
+
+void InstagramDash1440p_SetCurrentFilename(NSString *filename) {
+    if (!filename || filename.length == 0) return;
+    pthread_mutex_lock(&g_stateMutex);
+    if (![g_currentFdashFilename isEqualToString:filename]) {
+        g_currentFdashFilename = [filename copy];
+        pthread_mutex_unlock(&g_stateMutex);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
+        });
+        return;
+    }
+    pthread_mutex_unlock(&g_stateMutex);
+}
+
+// Extracts representation ID / fdash filename from representation object
+static void UpdateFilenameFromRepresentation(id rep) {
+    if (!rep) return;
+    NSString *repId = nil;
+    if ([rep respondsToSelector:@selector(representationId)]) {
+        repId = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(representationId));
+    }
+    if ((!repId || repId.length == 0) && [rep respondsToSelector:@selector(qualityLabel)]) {
+        repId = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(qualityLabel));
+    }
+    if ((!repId || repId.length == 0) && [rep respondsToSelector:@selector(description)]) {
+        repId = [rep description];
+    }
+    if (repId && [repId isKindOfClass:[NSString class]] && repId.length > 0) {
+        InstagramDash1440p_SetCurrentFilename(repId);
+    }
+}
 
 // ============================================================================
 // Core Representation Selection Logic (1440p Priority & Max Bitrate Filter)
@@ -116,18 +186,34 @@ static void SwizzleBoth(Class cls, SEL sel, IMP newImp, IMP *origImp, const char
 // ============================================================================
 
 // Bypasses representation pruning so 1440p representations are never discarded
+static id (*orig_sizePruner_pruneQualities)(id self, SEL _cmd, id qualities) = NULL;
+
 static id Hook_PruneQualitiesNoOp(id self, SEL _cmd, id qualities) {
+    if (!InstagramDash1440p_IsEnabled() && orig_sizePruner_pruneQualities) {
+        return orig_sizePruner_pruneQualities(self, _cmd, qualities);
+    }
     // Return all qualities unpruned
     return qualities;
 }
 
 // Forces playerSize, screenSize, and viewPortSize to report 1440x2560 dimensions
+static CGSize (*orig_meta_size)(id self, SEL _cmd) = NULL;
+static CGSize (*orig_meta_screenSize)(id self, SEL _cmd) = NULL;
+static CGSize (*orig_meta_viewPortSize)(id self, SEL _cmd) = NULL;
+
 static CGSize Hook_Return1440pSize(id self, SEL _cmd) {
+    if (!InstagramDash1440p_IsEnabled()) {
+        if (orig_meta_viewPortSize) return orig_meta_viewPortSize(self, _cmd);
+        if (orig_meta_size) return orig_meta_size(self, _cmd);
+    }
     return CGSizeMake(1440.0f, 2560.0f);
 }
 
 // Prevents skipping high quality representations on cellular or Wi-Fi (Avoid-On-Cell)
 static BOOL Hook_ShouldSkipRepAOC(id self, SEL _cmd, id rep, BOOL isOnWifi) {
+    if (!InstagramDash1440p_IsEnabled()) {
+        return YES;
+    }
     return NO;
 }
 
@@ -145,12 +231,17 @@ static BOOL Hook_ReturnNO(id self, SEL _cmd) {
 static id (*orig_ABRPlayerSize_selectQualityFromReps)(id self, SEL _cmd, NSArray *reps, double bw) = NULL;
 
 static id Hook_ABRPlayerSize_SelectQualityFromReps(id self, SEL _cmd, NSArray *representations, double bandwidth) {
-    id chosen = SelectHighestRepresentation(representations);
-    if (chosen) {
-        return chosen;
+    if (InstagramDash1440p_IsEnabled()) {
+        id chosen = SelectHighestRepresentation(representations);
+        if (chosen) {
+            UpdateFilenameFromRepresentation(chosen);
+            return chosen;
+        }
     }
     if (orig_ABRPlayerSize_selectQualityFromReps) {
-        return orig_ABRPlayerSize_selectQualityFromReps(self, _cmd, representations, bandwidth);
+        id stdRep = orig_ABRPlayerSize_selectQualityFromReps(self, _cmd, representations, bandwidth);
+        UpdateFilenameFromRepresentation(stdRep);
+        return stdRep;
     }
     return representations.firstObject;
 }
@@ -159,12 +250,17 @@ static id Hook_ABRPlayerSize_SelectQualityFromReps(id self, SEL _cmd, NSArray *r
 static id (*orig_ABR_selectQualityFromReps)(id self, SEL _cmd, NSArray *reps, void *seqIndices, double bw) = NULL;
 
 static id Hook_ABR_SelectQualityFromReps(id self, SEL _cmd, NSArray *representations, void *seqIndices, double bandwidth) {
-    id chosen = SelectHighestRepresentation(representations);
-    if (chosen) {
-        return chosen;
+    if (InstagramDash1440p_IsEnabled()) {
+        id chosen = SelectHighestRepresentation(representations);
+        if (chosen) {
+            UpdateFilenameFromRepresentation(chosen);
+            return chosen;
+        }
     }
     if (orig_ABR_selectQualityFromReps) {
-        return orig_ABR_selectQualityFromReps(self, _cmd, representations, seqIndices, bandwidth);
+        id stdRep = orig_ABR_selectQualityFromReps(self, _cmd, representations, seqIndices, bandwidth);
+        UpdateFilenameFromRepresentation(stdRep);
+        return stdRep;
     }
     return representations.firstObject;
 }
@@ -173,17 +269,24 @@ static id Hook_ABR_SelectQualityFromReps(id self, SEL _cmd, NSArray *representat
 static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
 
 static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
-    if (track == 1) { // 1 = Video Track
+    if (track == 1 && InstagramDash1440p_IsEnabled()) { // 1 = Video Track
         if ([self respondsToSelector:@selector(representationsForTrack:)]) {
             NSArray *reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), track);
             if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
                 id highest = SelectHighestRepresentation(reps);
-                if (highest) return highest;
+                if (highest) {
+                    UpdateFilenameFromRepresentation(highest);
+                    return highest;
+                }
             }
         }
     }
     if (orig_playlist_defaultRepresentationForTrack) {
-        return orig_playlist_defaultRepresentationForTrack(self, _cmd, track);
+        id stdRep = orig_playlist_defaultRepresentationForTrack(self, _cmd, track);
+        if (track == 1) {
+            UpdateFilenameFromRepresentation(stdRep);
+        }
+        return stdRep;
     }
     return nil;
 }
@@ -196,7 +299,8 @@ static void SwizzleDashClasses(void) {
     // 1. Bypass Player Size Pruning in FNFDashPlayerSizePruner & FNFDashPlayerQualityPruner
     Class sizePrunerCls = objc_getClass("FNFDashPlayerSizePruner");
     if (sizePrunerCls) {
-        SwizzleBoth(sizePrunerCls, sel_registerName("pruneQualities:"), (IMP)Hook_PruneQualitiesNoOp, NULL, "@@:@");
+        SwizzleBoth(sizePrunerCls, sel_registerName("pruneQualities:"),
+                    (IMP)Hook_PruneQualitiesNoOp, (IMP *)&orig_sizePruner_pruneQualities, "@@:@");
     }
 
     Class qualityPrunerCls = objc_getClass("FNFDashPlayerQualityPruner");
@@ -238,9 +342,9 @@ static void SwizzleDashClasses(void) {
     // 5. Force 1440p Viewport, Screen Size & Ignore-Avoid-On-Cell in FNFDashVideoPlayerMetadata
     Class metaCls = objc_getClass("FNFDashVideoPlayerMetadata");
     if (metaCls) {
-        SwizzleBoth(metaCls, sel_registerName("size"), (IMP)Hook_Return1440pSize, NULL, "{CGSize=dd}@:");
-        SwizzleBoth(metaCls, sel_registerName("screenSize"), (IMP)Hook_Return1440pSize, NULL, "{CGSize=dd}@:");
-        SwizzleBoth(metaCls, sel_registerName("viewPortSize"), (IMP)Hook_Return1440pSize, NULL, "{CGSize=dd}@:");
+        SwizzleBoth(metaCls, sel_registerName("size"), (IMP)Hook_Return1440pSize, (IMP *)&orig_meta_size, "{CGSize=dd}@:");
+        SwizzleBoth(metaCls, sel_registerName("screenSize"), (IMP)Hook_Return1440pSize, (IMP *)&orig_meta_screenSize, "{CGSize=dd}@:");
+        SwizzleBoth(metaCls, sel_registerName("viewPortSize"), (IMP)Hook_Return1440pSize, (IMP *)&orig_meta_viewPortSize, "{CGSize=dd}@:");
         SwizzleBoth(metaCls, sel_registerName("ignoreAvoidOnCell"), (IMP)Hook_ReturnYES, NULL, "B@:");
     }
 
