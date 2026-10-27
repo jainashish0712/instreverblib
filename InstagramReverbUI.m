@@ -9,6 +9,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import "InstagramReverbUI.h"
 #import "InstagramReverb.h"
+#import "InstagramDash1440p.h"
 
 // Accent Color: Vibrant Neon Green #1DB954 for maximum visibility and contrast
 #define ACCENT_COLOR [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:1.0f]
@@ -981,7 +982,133 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 // ============================================================================
 // HUD Manager Singleton
 // ============================================================================
+// ============================================================================
+// Floating Draggable 1440p DASH Quality Pill
+// ============================================================================
+@interface InstagramDash1440pPill : UIView
+@property (nonatomic, strong) UIVisualEffectView *blurView;
+@property (nonatomic, strong) UIView *statusDot;
+@property (nonatomic, strong) UILabel *titleLabel;
+- (void)updateAppearance;
+@end
+
+@implementation InstagramDash1440pPill
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = [UIColor colorWithRed:(18.0f/255.0f) green:(18.0f/255.0f) blue:(18.0f/255.0f) alpha:0.88f];
+        self.layer.cornerRadius = 10.0f;
+        self.layer.borderWidth = 1.0f;
+        self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.90f].CGColor;
+        self.clipsToBounds = YES;
+
+        UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
+        _blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
+        _blurView.frame = self.bounds;
+        _blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _blurView.userInteractionEnabled = NO;
+        [self addSubview:_blurView];
+
+        _statusDot = [[UIView alloc] initWithFrame:CGRectMake(8.0f, 7.5f, 5.0f, 5.0f)];
+        _statusDot.layer.cornerRadius = 2.5f;
+        _statusDot.layer.masksToBounds = YES;
+        _statusDot.userInteractionEnabled = NO;
+        [self addSubview:_statusDot];
+
+        _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(17.0f, 0.0f, frame.size.width - 23.0f, 20.0f)];
+        _titleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightBold];
+        _titleLabel.textColor = [UIColor whiteColor];
+        _titleLabel.textAlignment = NSTextAlignmentLeft;
+        _titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        _titleLabel.userInteractionEnabled = NO;
+        [self addSubview:_titleLabel];
+
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
+        [self addGestureRecognizer:tap];
+
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        [self addGestureRecognizer:pan];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onDashStateChanged:)
+                                                     name:kInstagramDash1440pStateDidChangeNotification
+                                                   object:nil];
+        [self updateAppearance];
+    }
+    return self;
+}
+
+- (void)handleTap:(UITapGestureRecognizer *)gesture {
+    InstagramDash1440p_ToggleEnabled();
+    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [feedback impactOccurred];
+    [self updateAppearance];
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)pan {
+    UIView *superview = self.superview;
+    if (!superview) return;
+
+    CGPoint translation = [pan translationInView:superview];
+    CGPoint newCenter = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
+
+    CGFloat halfW = self.bounds.size.width / 2.0f;
+    CGFloat halfH = self.bounds.size.height / 2.0f;
+    newCenter.x = MAX(halfW + 6.0f, MIN(superview.bounds.size.width - halfW - 6.0f, newCenter.x));
+    newCenter.y = MAX(halfH + 30.0f, MIN(superview.bounds.size.height - halfH - 30.0f, newCenter.y));
+
+    self.center = newCenter;
+    [pan setTranslation:CGPointZero inView:superview];
+}
+
+- (void)onDashStateChanged:(NSNotification *)note {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self updateAppearance];
+    });
+}
+
+- (void)updateAppearance {
+    BOOL isEnabled = InstagramDash1440p_IsEnabled();
+    NSString *quality = InstagramDash1440p_GetCurrentQuality() ?: @"1080p";
+    NSString *repId = InstagramDash1440p_GetCurrentRepresentationId() ?: @"ready";
+    BOOL is1440 = InstagramDash1440p_IsActual1440p();
+
+    NSString *text = isEnabled ? [NSString stringWithFormat:@"%@: %@", quality, repId]
+                               : [NSString stringWithFormat:@"OFF (%@)", quality];
+    self.titleLabel.text = text;
+
+    CGSize fit = [self.titleLabel sizeThatFits:CGSizeMake(320.0f, 20.0f)];
+    CGFloat targetWidth = MAX(110.0f, MIN(320.0f, fit.width + 26.0f));
+
+    CGRect f = self.frame;
+    f.size.width = targetWidth;
+    f.size.height = 20.0f;
+    self.frame = f;
+    self.titleLabel.frame = CGRectMake(17.0f, 0.0f, targetWidth - 23.0f, 20.0f);
+
+    if (isEnabled) {
+        if (is1440 || [quality isEqualToString:@"1440p"]) {
+            // Vibrant Cyan for 1440p
+            self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.90f].CGColor;
+            self.statusDot.backgroundColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
+        } else {
+            // Emerald Green for 1080p
+            self.layer.borderColor = [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:0.85f].CGColor;
+            self.statusDot.backgroundColor = [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:1.0f];
+        }
+        self.titleLabel.textColor = [UIColor whiteColor];
+    } else {
+        self.layer.borderColor = [UIColor colorWithWhite:0.6f alpha:0.45f].CGColor;
+        self.statusDot.backgroundColor = [UIColor colorWithWhite:0.6f alpha:0.8f];
+        self.titleLabel.textColor = [UIColor colorWithWhite:0.75f alpha:1.0f];
+    }
+}
+
+@end
+
 @interface InstagramReverbHUDManager ()
+@property (nonatomic, strong) InstagramDash1440pPill *dashPill;
 @property (nonatomic, strong) InstagramReverbOverlayWindow *overlayWindow;
 @property (nonatomic, strong) InstagramReverbFloatingButton *floatingButton;
 @property (nonatomic, strong) InstagramReverbVolumeBar *volumeBar;
@@ -1086,6 +1213,20 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         } else if (!self.volumeBar.superview) {
             [container addSubview:self.volumeBar];
             [self.volumeBar revealAndResetTimer];
+        }
+
+        // Floating 1440p DASH Quality Pill in top-right
+        if (!self.dashPill) {
+            CGFloat pillW = 130.0f;
+            CGFloat pillH = 20.0f;
+            CGFloat initialX = container.bounds.size.width - pillW - 12.0f;
+            CGFloat initialY = 54.0f; // Below status bar notch
+            self.dashPill = [[InstagramDash1440pPill alloc] initWithFrame:CGRectMake(initialX, initialY, pillW, pillH)];
+            [container addSubview:self.dashPill];
+            [self.dashPill updateAppearance];
+        } else if (!self.dashPill.superview) {
+            [container addSubview:self.dashPill];
+            [self.dashPill updateAppearance];
         }
 
         static BOOL sGestureAdded = NO;

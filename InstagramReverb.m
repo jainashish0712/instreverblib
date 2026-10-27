@@ -33,6 +33,7 @@
 #import <time.h>
 #import "InstagramReverb.h"
 #import "InstagramWifiSpoofer.h"
+#import "InstagramDash1440p.h"
 #import "fishhook.h"
 
 #ifdef __LP64__

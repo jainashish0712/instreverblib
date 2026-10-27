@@ -13,14 +13,14 @@ if [ -n "$SDK_PATH" ]; then
         -isysroot "$SDK_PATH" \
         $FRAMEWORKS \
         -O3 -fobjc-arc \
-        fishhook.c InstagramReverb.m InstagramReverbUI.m InstagramWifiSpoofer.m \
+        fishhook.c InstagramReverb.m InstagramReverbUI.m InstagramWifiSpoofer.m InstagramDash1440p.mm -lc++ \
         -o InstagramReverb.dylib
 else
     echo "Using direct clang..."
     clang -dynamiclib -target arm64-apple-ios14.0 \
         $FRAMEWORKS \
         -O3 -fobjc-arc \
-        fishhook.c InstagramReverb.m InstagramReverbUI.m InstagramWifiSpoofer.m \
+        fishhook.c InstagramReverb.m InstagramReverbUI.m InstagramWifiSpoofer.m InstagramDash1440p.mm -lc++ \
         -o InstagramReverb.dylib
 fi
 
