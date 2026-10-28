@@ -206,10 +206,16 @@ static uint64_t GetRepresentationBitrate(id rep) {
     if (!actual) actual = rep;
 
     if ([actual respondsToSelector:@selector(bandwidth)]) {
-        return (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(actual, @selector(bandwidth));
+        uint64_t bw = ((uint64_t (*)(id, SEL))objc_msgSend)(actual, @selector(bandwidth));
+        if (bw > 0) return bw;
     }
     if ([actual respondsToSelector:@selector(bitrate)]) {
-        return (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(actual, @selector(bitrate));
+        uint64_t br = ((uint64_t (*)(id, SEL))objc_msgSend)(actual, @selector(bitrate));
+        if (br > 0) return br;
+    }
+    if ([actual respondsToSelector:@selector(bandwidthInBitsPerSecond)]) {
+        uint64_t bw = ((uint64_t (*)(id, SEL))objc_msgSend)(actual, @selector(bandwidthInBitsPerSecond));
+        if (bw > 0) return bw;
     }
     return 0;
 }
@@ -457,11 +463,15 @@ static id HandleQualitySelection(id self, SEL _cmd, IMP origImp, const char *cla
         id targetRep = SelectTargetRepresentation(reps, isPrefetch);
         if (targetRep) {
             DashLog(@"[%s] Forcing target quality representation: %@", className, targetRep);
+            if (!isPrefetch) {
+                UpdateActiveRepresentation(targetRep, NO);
+            }
             return targetRep;
         }
     } else {
         DashLog(@"[%s] Could not extract candidate representations array; tracking standard result: %@", className, chosen);
-        if (chosen) {
+        BOOL isPrefetch = (strstr(className, "Prefetch") != NULL);
+        if (chosen && !isPrefetch) {
             UpdateActiveRepresentation(chosen, NO);
         }
     }
@@ -501,9 +511,12 @@ static id (*orig_ABR_selectQualitySeqIndices)(id self, SEL _cmd, NSArray *repres
 static id Hook_ABR_SelectQualitySeqIndices(id self, SEL _cmd, NSArray *representations, std::vector<int> seqIndices, double bandwidth) {
     DashLog(@"[FNFDashABRQualitySelector] _selectQualityFromRepresentations:sequenceIndices:... called with %lu reps", (unsigned long)representations.count);
     if (InstagramDash1440p_IsEnabled() && representations && [representations isKindOfClass:[NSArray class]] && representations.count > 0) {
-        id chosen = SelectTargetRepresentation(representations, NO);
-        if (chosen) {
-            return chosen;
+        if (!IsAudioRepresentation(representations.firstObject)) {
+            id chosen = SelectTargetRepresentation(representations, NO);
+            if (chosen) {
+                UpdateActiveRepresentation(chosen, NO);
+                return chosen;
+            }
         }
     }
     if (orig_ABR_selectQualitySeqIndices) {
@@ -531,13 +544,17 @@ static NSArray * Hook_Playlist_RepresentationsForTrack(id self, SEL _cmd, NSInte
     if (orig_playlist_representationsForTrack) {
         origReps = orig_playlist_representationsForTrack(self, _cmd, track);
     }
-    if (track != 0 || !InstagramDash1440p_IsEnabled() || !origReps || ![origReps isKindOfClass:[NSArray class]] || origReps.count <= 1) {
+    if (!InstagramDash1440p_IsEnabled() || !origReps || ![origReps isKindOfClass:[NSArray class]] || origReps.count <= 1) {
+        return origReps;
+    }
+
+    if (IsAudioRepresentation(origReps.firstObject)) {
         return origReps;
     }
 
     id chosen = SelectTargetRepresentation(origReps, YES);
     if (chosen) {
-        DashLog(@"[FNFDashPlaylist] representationsForTrack:0 filtered to target quality: %@", chosen);
+        DashLog(@"[FNFDashPlaylist] representationsForTrack:%ld filtered to target quality: %@", (long)track, chosen);
         return @[ chosen ];
     }
     return origReps;
@@ -568,15 +585,15 @@ static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSIn
 
 static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
     DashLog(@"[FNFDashPlaylist] defaultRepresentationForTrack:%ld invoked", (long)track);
-    if (track == 0 && InstagramDash1440p_IsEnabled()) {
+    if (InstagramDash1440p_IsEnabled()) {
         NSArray *reps = nil;
         if ([self respondsToSelector:@selector(representationsForTrack:)]) {
-            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), 0);
+            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), track);
         }
-        if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
+        if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0 && !IsAudioRepresentation(reps.firstObject)) {
             id chosen = SelectTargetRepresentation(reps, YES);
             if (chosen) {
-                DashLog(@"[FNFDashPlaylist] defaultRepresentationForTrack:0 (Video) forced: %@", chosen);
+                DashLog(@"[FNFDashPlaylist] defaultRepresentationForTrack:%ld (Video) forced: %@", (long)track, chosen);
                 return chosen;
             }
         }
@@ -715,10 +732,25 @@ static void (*orig_qualityProvider_videoQualitySelected)(id self, SEL _cmd, id r
 
 static void Hook_QualityProvider_VideoQualitySelected(id self, SEL _cmd, id rep, id meta, NSInteger track) {
     DashLog(@"[IGFNFSelectedQualityProvider] videoQualitySelected: track=%ld rep=%@", (long)track, rep);
-    if (track == 0 && rep) {
-        id actualRep = ExtractRepresentationFromObject(rep);
-        if (actualRep && !IsAudioRepresentation(actualRep)) {
-            UpdateActiveRepresentation(actualRep, NO);
+    if (rep) {
+        BOOL isIntentional = YES;
+        if (meta) {
+            if ([meta respondsToSelector:@selector(isIntentional)]) {
+                isIntentional = ((BOOL (*)(id, SEL))objc_msgSend)(meta, @selector(isIntentional));
+            } else {
+                @try {
+                    id val = [meta valueForKey:@"isIntentional"];
+                    if (val && [val respondsToSelector:@selector(boolValue)]) {
+                        isIntentional = [val boolValue];
+                    }
+                } @catch (NSException *e) {}
+            }
+        }
+        if (isIntentional) {
+            id actualRep = ExtractRepresentationFromObject(rep);
+            if (actualRep && !IsAudioRepresentation(actualRep)) {
+                UpdateActiveRepresentation(actualRep, NO);
+            }
         }
     }
     if (orig_qualityProvider_videoQualitySelected) {
@@ -730,12 +762,6 @@ static void (*orig_qualityProvider_setVideoRep)(id self, SEL _cmd, id rep) = NUL
 
 static void Hook_QualityProvider_SetVideoRep(id self, SEL _cmd, id rep) {
     DashLog(@"[IGFNFSelectedQualityProvider] setVideoSelectedQualityRepresentation: %@", rep);
-    if (rep) {
-        id actualRep = ExtractRepresentationFromObject(rep);
-        if (actualRep && !IsAudioRepresentation(actualRep)) {
-            UpdateActiveRepresentation(actualRep, NO);
-        }
-    }
     if (orig_qualityProvider_setVideoRep) {
         orig_qualityProvider_setVideoRep(self, _cmd, rep);
     }
