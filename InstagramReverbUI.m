@@ -1174,6 +1174,31 @@ static float QueryCurrentProcessCPU(void) {
     return totalCpu;
 }
 
+static float ExtractGPUValueFromDict(CFDictionaryRef dict) {
+    if (!dict || CFGetTypeID(dict) != CFDictionaryGetTypeID()) return -1.0f;
+    const CFStringRef keys[] = {
+        CFSTR("Device Utilization %"),
+        CFSTR("GPU Core Utilization"),
+        CFSTR("Renderer Utilization %"),
+        CFSTR("Tiler Utilization %"),
+        CFSTR("Device Utilization"),
+        CFSTR("gpu-core-utilization"),
+        CFSTR("device-utilization")
+    };
+    for (size_t k = 0; k < sizeof(keys)/sizeof(keys[0]); k++) {
+        CFTypeRef num = CFDictionaryGetValue(dict, keys[k]);
+        if (num && CFGetTypeID(num) == CFNumberGetTypeID()) {
+            float val = 0.0f;
+            if (CFNumberGetValue((CFNumberRef)num, kCFNumberFloatType, &val)) {
+                if (val >= 0.0f) {
+                    return val;
+                }
+            }
+        }
+    }
+    return -1.0f;
+}
+
 static float QueryCurrentGPU(void) {
     static void *s_iokit = NULL;
     static dispatch_once_t s_once;
@@ -1193,57 +1218,59 @@ static float QueryCurrentGPU(void) {
     static IOObjectReleaseFunc s_IOObjectRelease = NULL;
 
     dispatch_once(&s_once, ^{
-        s_iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
-        if (s_iokit) {
-            s_IOServiceMatching = (IOServiceMatchingFunc)dlsym(s_iokit, "IOServiceMatching");
-            s_IOServiceGetMatchingServices = (IOServiceGetMatchingServicesFunc)dlsym(s_iokit, "IOServiceGetMatchingServices");
-            s_IOIteratorNext = (IOIteratorNextFunc)dlsym(s_iokit, "IOIteratorNext");
-            s_IORegistryEntryCreateCFProperties = (IORegistryEntryCreateCFPropertiesFunc)dlsym(s_iokit, "IORegistryEntryCreateCFProperties");
-            s_IOObjectRelease = (IOObjectReleaseFunc)dlsym(s_iokit, "IOObjectRelease");
-        }
+        s_iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY | RTLD_GLOBAL);
+        void *handle = s_iokit ? s_iokit : RTLD_DEFAULT;
+        s_IOServiceMatching = (IOServiceMatchingFunc)dlsym(handle, "IOServiceMatching");
+        s_IOServiceGetMatchingServices = (IOServiceGetMatchingServicesFunc)dlsym(handle, "IOServiceGetMatchingServices");
+        s_IOIteratorNext = (IOIteratorNextFunc)dlsym(handle, "IOIteratorNext");
+        s_IORegistryEntryCreateCFProperties = (IORegistryEntryCreateCFPropertiesFunc)dlsym(handle, "IORegistryEntryCreateCFProperties");
+        s_IOObjectRelease = (IOObjectReleaseFunc)dlsym(handle, "IOObjectRelease");
     });
 
     if (!s_IOServiceMatching || !s_IOServiceGetMatchingServices || !s_IOIteratorNext || !s_IORegistryEntryCreateCFProperties || !s_IOObjectRelease) {
         return -1.0f;
     }
 
-    CFMutableDictionaryRef matchDict = s_IOServiceMatching("IOAccelerator");
-    if (!matchDict) return -1.0f;
-
-    io_iterator_t iterator = NULL;
-    kern_return_t kr = s_IOServiceGetMatchingServices(0, matchDict, &iterator);
-    if (kr != KERN_SUCCESS || !iterator) return -1.0f;
+    const char *serviceNames[] = {
+        "AGXAccelerator",
+        "IOGPU",
+        "IOAccelerator",
+        "AppleARMGPU",
+        "IOAcceleratorES"
+    };
 
     float gpuUsage = -1.0f;
-    io_registry_entry_t entry = NULL;
-    while ((entry = s_IOIteratorNext(iterator)) != NULL) {
-        CFMutableDictionaryRef props = NULL;
-        if (s_IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS && props) {
-            CFDictionaryRef perfStats = (CFDictionaryRef)CFDictionaryGetValue(props, CFSTR("PerformanceStatistics"));
-            if (perfStats && CFGetTypeID(perfStats) == CFDictionaryGetTypeID()) {
-                const CFStringRef keys[] = {
-                    CFSTR("Device Utilization %"),
-                    CFSTR("GPU Core Utilization"),
-                    CFSTR("Renderer Utilization %"),
-                    CFSTR("Tiler Utilization %")
-                };
-                for (size_t k = 0; k < sizeof(keys)/sizeof(keys[0]); k++) {
-                    CFNumberRef num = (CFNumberRef)CFDictionaryGetValue(perfStats, keys[k]);
-                    if (num && CFGetTypeID(num) == CFNumberGetTypeID()) {
-                        int val = 0;
-                        if (CFNumberGetValue(num, kCFNumberIntType, &val)) {
-                            gpuUsage = (float)val;
-                            break;
-                        }
-                    }
+    for (size_t s = 0; s < sizeof(serviceNames)/sizeof(serviceNames[0]); s++) {
+        CFMutableDictionaryRef matchDict = s_IOServiceMatching(serviceNames[s]);
+        if (!matchDict) continue;
+
+        io_iterator_t iterator = 0;
+        kern_return_t kr = s_IOServiceGetMatchingServices(0, matchDict, &iterator);
+        if (kr != KERN_SUCCESS || !iterator) continue;
+
+        io_registry_entry_t entry = 0;
+        while ((entry = s_IOIteratorNext(iterator)) != 0) {
+            CFMutableDictionaryRef props = NULL;
+            if (s_IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS && props) {
+                CFDictionaryRef perfStats = (CFDictionaryRef)CFDictionaryGetValue(props, CFSTR("PerformanceStatistics"));
+                float val = ExtractGPUValueFromDict(perfStats);
+                if (val < 0.0f) {
+                    val = ExtractGPUValueFromDict(props);
+                }
+                CFRelease(props);
+
+                if (val >= 0.0f) {
+                    gpuUsage = val;
+                    s_IOObjectRelease(entry);
+                    break;
                 }
             }
-            CFRelease(props);
+            s_IOObjectRelease(entry);
         }
-        s_IOObjectRelease(entry);
+        s_IOObjectRelease(iterator);
         if (gpuUsage >= 0.0f) break;
     }
-    s_IOObjectRelease(iterator);
+
     return gpuUsage;
 }
 
@@ -1387,13 +1414,13 @@ static NSString *FormatDataRate(double bytesPerSec) {
             if (gpu >= 0.0f) {
                 displayText = [NSString stringWithFormat:@"C:%.0f%% G:%.0f%% %@", cpu, gpu, FormatDataRate(MAX(wifiRate, cellRate))];
             } else {
-                displayText = [NSString stringWithFormat:@"C:%.0f%% %@", cpu, FormatDataRate(MAX(wifiRate, cellRate))];
+                displayText = [NSString stringWithFormat:@"C:%.0f%% G:-- %@", cpu, FormatDataRate(MAX(wifiRate, cellRate))];
             }
         } else {
             if (gpu >= 0.0f) {
                 displayText = [NSString stringWithFormat:@"CPU: %.0f%% | GPU: %.0f%% | %@", cpu, gpu, netText];
             } else {
-                displayText = [NSString stringWithFormat:@"CPU: %.0f%% | %@", cpu, netText];
+                displayText = [NSString stringWithFormat:@"CPU: %.0f%% | GPU: -- | %@", cpu, netText];
             }
         }
 
