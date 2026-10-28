@@ -177,11 +177,6 @@ static CGSize GetRepresentationPixelDimensions(id rep) {
         sz = ((CGSize (*)(id, SEL))objc_msgSend)(actual, @selector(videoSize));
     }
     if (sz.width <= 0.0f || sz.height <= 0.0f) {
-        if ([actual respondsToSelector:@selector(size)]) {
-            sz = ((CGSize (*)(id, SEL))objc_msgSend)(actual, @selector(size));
-        }
-    }
-    if (sz.width <= 0.0f || sz.height <= 0.0f) {
         CGFloat w = 0.0f, h = 0.0f;
         if ([actual respondsToSelector:@selector(videoWidth)]) {
             w = (CGFloat)((NSInteger (*)(id, SEL))objc_msgSend)(actual, @selector(videoWidth));
@@ -243,37 +238,136 @@ static NSString *GetRepresentationEncodingTag(id rep) {
 }
 
 // ============================================================================
-// State & Telemetry Updates
+// Representation Metadata Cache & Active Reel Player Telemetry
 // ============================================================================
 
-static void UpdateActiveRepresentation(id rep, BOOL isPrefetch) {
-    if (!rep || IsAudioRepresentation(rep)) return;
+static NSMutableDictionary *g_repMetadataCache = nil;
+static pthread_mutex_t g_cacheMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void CacheRepresentationMetadata(id rep) {
+    if (!rep) return;
     id actual = ExtractRepresentationFromObject(rep);
     if (!actual || IsAudioRepresentation(actual)) return;
 
+    NSString *repId = GetRepresentationId(actual);
+    if (!repId || repId.length == 0) return;
+
     CGSize sz = GetRepresentationPixelDimensions(actual);
+    NSString *tag = GetRepresentationEncodingTag(actual) ?: @"";
+    uint64_t bw = GetRepresentationBitrate(actual);
+
+    pthread_mutex_lock(&g_cacheMutex);
+    if (!g_repMetadataCache) {
+        g_repMetadataCache = [[NSMutableDictionary alloc] init];
+    }
+    g_repMetadataCache[repId] = @{
+        @"width": @(sz.width),
+        @"height": @(sz.height),
+        @"tag": tag,
+        @"bw": @(bw)
+    };
+    pthread_mutex_unlock(&g_cacheMutex);
+}
+
+static __weak id g_activePlayingPlayer = nil;
+static pthread_mutex_t g_playerMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrideRepId, NSString *overrideTag) {
+    if (!player) return;
+
+    // Check if the player is currently playing
+    BOOL isPlaying = NO;
+    if ([player respondsToSelector:@selector(isPlaying)]) {
+        @try {
+            isPlaying = ((BOOL (*)(id, SEL))objc_msgSend)(player, @selector(isPlaying));
+        } @catch (...) {}
+    }
+
+    // Check if the player's video view is in the visible window hierarchy
+    BOOL isOnScreen = NO;
+    if ([player respondsToSelector:@selector(videoView)]) {
+        @try {
+            UIView *vv = ((UIView * (*)(id, SEL))objc_msgSend)(player, @selector(videoView));
+            if (vv && [vv isKindOfClass:[UIView class]] && vv.window != nil && !vv.hidden && vv.alpha > 0.01f) {
+                isOnScreen = YES;
+            }
+        } @catch (...) {}
+    }
+
+    // Strict Guard: Badge must strictly show ONLY currently playing reel and NEVER next/offscreen reel.
+    // If not playing and not on screen, this player is strictly offscreen/prefetch/idle. Reject!
+    pthread_mutex_lock(&g_playerMutex);
+    id active = g_activePlayingPlayer;
+
+    if (isPlaying) {
+        g_activePlayingPlayer = player;
+    } else if (isOnScreen && active == player) {
+        // Current visible reel is paused; retain active tracking
+    } else {
+        // Offscreen, prefetching, or non-active background player: STRICTLY REJECT!
+        pthread_mutex_unlock(&g_playerMutex);
+        return;
+    }
+    pthread_mutex_unlock(&g_playerMutex);
+
+    // Extract representation ID
+    NSString *repId = overrideRepId;
+    if (!repId || repId.length == 0) {
+        if ([player respondsToSelector:@selector(currentRepresentationId)]) {
+            @try {
+                repId = ((NSString * (*)(id, SEL))objc_msgSend)(player, @selector(currentRepresentationId));
+            } @catch (...) {}
+        }
+    }
+    if (!repId || repId.length == 0) return;
+
+    // Extract video size
+    CGSize sz = CGSizeZero;
+    if ([player respondsToSelector:@selector(currentVideoSize)]) {
+        @try {
+            sz = ((CGSize (*)(id, SEL))objc_msgSend)(player, @selector(currentVideoSize));
+        } @catch (...) {}
+    }
+
+    // Extract encoding tag
+    NSString *tag = overrideTag;
+    if (!tag && [player respondsToSelector:@selector(_currentVideoEncodingTag)]) {
+        @try {
+            tag = ((NSString * (*)(id, SEL))objc_msgSend)(player, @selector(_currentVideoEncodingTag));
+        } @catch (...) {}
+    }
+
+    uint64_t bw = 0;
+    // If size was not yet populated on player, lookup in representation metadata cache
+    if (sz.width <= 0.0f || sz.height <= 0.0f) {
+        pthread_mutex_lock(&g_cacheMutex);
+        NSDictionary *dict = g_repMetadataCache[repId];
+        if (dict) {
+            CGFloat w = [dict[@"width"] doubleValue];
+            CGFloat h = [dict[@"height"] doubleValue];
+            sz = CGSizeMake(w, h);
+            if (!tag || tag.length == 0) {
+                tag = dict[@"tag"];
+            }
+            bw = [dict[@"bw"] unsignedLongLongValue];
+        }
+        pthread_mutex_unlock(&g_cacheMutex);
+    }
+
     CGFloat minDim = MIN(sz.width, sz.height);
     CGFloat maxDim = MAX(sz.width, sz.height);
     uint64_t pixels = (uint64_t)(sz.width * sz.height);
-    NSString *repId = GetRepresentationId(actual) ?: @"unknown";
-    NSString *encodingTag = GetRepresentationEncodingTag(actual);
 
-    BOOL is1440 = (minDim > 1080.0f || maxDim > 1920.0f || pixels > 2200000ULL ||
-                   (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])) ||
-                   (encodingTag && ([encodingTag containsString:@"1440"] || [encodingTag containsString:@"2k"])));
+    BOOL is1440 = (minDim >= 1200.0f || maxDim >= 2200.0f || pixels >= 2800000ULL ||
+                   (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"968238693007748"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])) ||
+                   (tag && ([tag containsString:@"1440"] || [tag containsString:@"2k"])));
 
-    BOOL is1080 = (!is1440 && (minDim >= 1000.0f || maxDim >= 1800.0f || pixels >= 1900000ULL ||
+    BOOL is1080 = (!is1440 && (minDim >= 960.0f || maxDim >= 1700.0f || pixels >= 1600000ULL ||
                    (repId && [repId containsString:@"1080"]) ||
-                   (encodingTag && [encodingTag containsString:@"1080"])));
+                   (tag && [tag containsString:@"1080"])));
 
     NSString *quality = is1440 ? @"1440p" : (is1080 ? @"1080p" : [NSString stringWithFormat:@"%.0fp", minDim > 0.0f ? minDim : 1080.0f]);
     NSString *resolution = (sz.width > 0.0f && sz.height > 0.0f) ? [NSString stringWithFormat:@"%.0fx%.0f", sz.width, sz.height] : (is1440 ? @"1440x2560" : @"1080x1920");
-
-    if (isPrefetch) {
-        DashLog(@"[Prefetch Engine] Queued offscreen chunk: %@ (%@, %@, %llu bps)",
-                quality, repId, resolution, bw);
-        return;
-    }
 
     BOOL changed = NO;
     pthread_mutex_lock(&g_stateMutex);
@@ -290,8 +384,7 @@ static void UpdateActiveRepresentation(id rep, BOOL isPrefetch) {
     pthread_mutex_unlock(&g_stateMutex);
 
     if (changed) {
-        DashLog(@"[Active Playback] Representation locked: %@ (%@, %@, %llu bps)",
-                quality, repId, resolution, bw);
+        DashLog(@"[Active Playing Reel Telemetry] On-screen reel: Quality=%@ (%@, %@, %llu bps)", quality, resolution, repId, bw);
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
         });
@@ -320,6 +413,9 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
     for (id rep in representations) {
         if (!rep || IsAudioRepresentation(rep)) continue;
 
+        // Cache metadata for reliable on-screen active telemetry resolution
+        CacheRepresentationMetadata(rep);
+
         CGSize sz = GetRepresentationPixelDimensions(rep);
         CGFloat minDim = MIN(sz.width, sz.height);
         CGFloat maxDim = MAX(sz.width, sz.height);
@@ -328,11 +424,11 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
         NSString *repId = GetRepresentationId(rep);
         NSString *encodingTag = GetRepresentationEncodingTag(rep);
 
-        BOOL is1440 = (minDim > 1080.0f || maxDim > 1920.0f || pixels > 2200000ULL ||
-                       (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])) ||
+        BOOL is1440 = (minDim >= 1200.0f || maxDim >= 2200.0f || pixels >= 2800000ULL ||
+                       (repId && ([repId containsString:@"1440"] || [repId containsString:@"2k"])) ||
                        (encodingTag && ([encodingTag containsString:@"1440"] || [encodingTag containsString:@"2k"])));
 
-        BOOL is1080 = (!is1440 && (minDim >= 1000.0f || maxDim >= 1800.0f || pixels >= 1900000ULL ||
+        BOOL is1080 = (!is1440 && (minDim >= 960.0f || maxDim >= 1700.0f || pixels >= 1600000ULL ||
                        (repId && [repId containsString:@"1080"]) ||
                        (encodingTag && [encodingTag containsString:@"1080"])));
 
@@ -415,7 +511,7 @@ static id HandleQualitySelection(id self, SEL _cmd, IMP origImp, const char *cla
     DashLog(@"[%s] selectQuality invoked, standard result: %@", className, chosen);
 
     if (!InstagramDash1440p_IsEnabled()) {
-        if (chosen) UpdateActiveRepresentation(chosen, NO);
+        if (chosen) CacheRepresentationMetadata(chosen);
         return chosen;
     }
 
@@ -462,7 +558,7 @@ static id HandleQualitySelection(id self, SEL _cmd, IMP origImp, const char *cla
     } else {
         DashLog(@"[%s] Could not extract candidate representations array; tracking standard result: %@", className, chosen);
         if (chosen) {
-            UpdateActiveRepresentation(chosen, NO);
+            CacheRepresentationMetadata(chosen);
         }
     }
 
@@ -535,7 +631,7 @@ static NSArray * Hook_Playlist_RepresentationsForTrack(id self, SEL _cmd, NSInte
         return origReps;
     }
 
-    id chosen = SelectTargetRepresentation(origReps, YES);
+    id chosen = SelectTargetRepresentation(origReps, NO);
     if (chosen) {
         DashLog(@"[FNFDashPlaylist] representationsForTrack:0 filtered to target quality: %@", chosen);
         return @[ chosen ];
@@ -718,7 +814,7 @@ static void Hook_QualityProvider_VideoQualitySelected(id self, SEL _cmd, id rep,
     if (track == 0 && rep) {
         id actualRep = ExtractRepresentationFromObject(rep);
         if (actualRep && !IsAudioRepresentation(actualRep)) {
-            UpdateActiveRepresentation(actualRep, NO);
+            CacheRepresentationMetadata(actualRep);
         }
     }
     if (orig_qualityProvider_videoQualitySelected) {
@@ -733,12 +829,42 @@ static void Hook_QualityProvider_SetVideoRep(id self, SEL _cmd, id rep) {
     if (rep) {
         id actualRep = ExtractRepresentationFromObject(rep);
         if (actualRep && !IsAudioRepresentation(actualRep)) {
-            UpdateActiveRepresentation(actualRep, NO);
+            CacheRepresentationMetadata(actualRep);
         }
     }
     if (orig_qualityProvider_setVideoRep) {
         orig_qualityProvider_setVideoRep(self, _cmd, rep);
     }
+}
+
+// ============================================================================
+// IGFNFVideoPlayer Hooks: Strictly Track Currently Playing On-Screen Reel
+// ============================================================================
+
+static void (*orig_FNFVideoPlayer_stateManagerTransitionToVideoStartedPlaying)(id self, SEL _cmd) = NULL;
+static void Hook_FNFVideoPlayer_StateManagerTransitionToVideoStartedPlaying(id self, SEL _cmd) {
+    if (orig_FNFVideoPlayer_stateManagerTransitionToVideoStartedPlaying) {
+        orig_FNFVideoPlayer_stateManagerTransitionToVideoStartedPlaying(self, _cmd);
+    }
+    UpdateActivePlaybackTelemetryFromPlayer(self, nil, nil);
+}
+
+static void (*orig_FNFVideoPlayer_videoRepresentationIdChanged)(id self, SEL _cmd, id repId, id codec, id encodingTag, id audioRoleMetadata) = NULL;
+static void Hook_FNFVideoPlayer_VideoRepresentationIdChanged(id self, SEL _cmd, id repId, id codec, id encodingTag, id audioRoleMetadata) {
+    if (orig_FNFVideoPlayer_videoRepresentationIdChanged) {
+        orig_FNFVideoPlayer_videoRepresentationIdChanged(self, _cmd, repId, codec, encodingTag, audioRoleMetadata);
+    }
+    NSString *repIdStr = [repId isKindOfClass:[NSString class]] ? repId : (repId ? [NSString stringWithFormat:@"%@", repId] : nil);
+    NSString *tagStr = [encodingTag isKindOfClass:[NSString class]] ? encodingTag : (encodingTag ? [NSString stringWithFormat:@"%@", encodingTag] : nil);
+    UpdateActivePlaybackTelemetryFromPlayer(self, repIdStr, tagStr);
+}
+
+static void (*orig_FNFVideoPlayer_playWithReason)(id self, SEL _cmd, NSInteger reason, id callsite) = NULL;
+static void Hook_FNFVideoPlayer_PlayWithReason(id self, SEL _cmd, NSInteger reason, id callsite) {
+    if (orig_FNFVideoPlayer_playWithReason) {
+        orig_FNFVideoPlayer_playWithReason(self, _cmd, reason, callsite);
+    }
+    UpdateActivePlaybackTelemetryFromPlayer(self, nil, nil);
 }
 
 // ============================================================================
@@ -825,6 +951,20 @@ static void SwizzleDashClasses(void) {
                           (IMP)Hook_QualityProvider_VideoQualitySelected, (IMP *)&orig_qualityProvider_videoQualitySelected);
         SafeSwizzleMethod(qualityProviderCls, sel_registerName("setVideoSelectedQualityRepresentation:"),
                           (IMP)Hook_QualityProvider_SetVideoRep, (IMP *)&orig_qualityProvider_setVideoRep);
+    }
+
+    // 6. Active On-Screen Reel Video Player (Strictly active playback only, no offscreen/prefetch)
+    Class videoPlayerCls = objc_getClass("IGFNFVideoPlayer");
+    if (videoPlayerCls) {
+        SafeSwizzleMethod(videoPlayerCls, sel_registerName("_stateManagerTransitionToVideoStartedPlaying"),
+                          (IMP)Hook_FNFVideoPlayer_StateManagerTransitionToVideoStartedPlaying,
+                          (IMP *)&orig_FNFVideoPlayer_stateManagerTransitionToVideoStartedPlaying);
+        SafeSwizzleMethod(videoPlayerCls, sel_registerName("videoRepresentationIdChanged:codec:encodingTag:audioRoleMetadata:"),
+                          (IMP)Hook_FNFVideoPlayer_VideoRepresentationIdChanged,
+                          (IMP *)&orig_FNFVideoPlayer_videoRepresentationIdChanged);
+        SafeSwizzleMethod(videoPlayerCls, sel_registerName("playWithReason:callsiteContext:"),
+                          (IMP)Hook_FNFVideoPlayer_PlayWithReason,
+                          (IMP *)&orig_FNFVideoPlayer_playWithReason);
     }
 
     DashLog(@"1440p VP9 DASH hook registration pass finished");
