@@ -97,8 +97,9 @@ NSString *InstagramDash1440p_GetCurrentRepresentationId(void) {
 }
 
 NSString *InstagramDash1440p_GetLogFilePath(void) {
-    ResolveLogPath();
-    return [NSString stringWithUTF8String:g_docLogPath];
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docDir = paths.firstObject ?: NSTemporaryDirectory();
+    return [docDir stringByAppendingPathComponent:@"Instagram1440p.log"];
 }
 
 // ============================================================================
@@ -839,11 +840,8 @@ static void ApplyAllDash1440pSwizzles(void) {
 void InstagramDash1440p_Init(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        ResolveLogPath();
-
         DashLog(@"==================================================================");
         DashLog(@"Initializing Ultra-HD 1440p VP9 DASH Video Engine for Instagram");
-        DashLog(@"Target Log: %s", g_docLogPath);
         DashLog(@"Active Reels & Feed Prefetchers: 1440p Priority, 1080p Fallback Floor");
         DashLog(@"Apple VideoToolbox VP9 Hardware/Hybrid Decoder Enabled");
         DashLog(@"==================================================================");
