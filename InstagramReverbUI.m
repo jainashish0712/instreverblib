@@ -7,6 +7,14 @@
 #import <QuartzCore/QuartzCore.h>
 #import <MediaPlayer/MediaPlayer.h>
 #import <AVFoundation/AVFoundation.h>
+#import <mach/mach.h>
+#import <mach/task.h>
+#import <mach/thread_act.h>
+#import <sys/types.h>
+#import <sys/socket.h>
+#import <ifaddrs.h>
+#import <net/if.h>
+#import <dlfcn.h>
 #import "InstagramReverbUI.h"
 #import "InstagramReverb.h"
 #import "InstagramDash1440p.h"
@@ -1111,7 +1119,346 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
 @end
 
+
+// ============================================================================
+// Real-Time System & Hardware Performance Telemetry Badge (2-Second Polling)
+// ============================================================================
+
+typedef struct {
+    uint64_t wifiInBytes;
+    uint64_t wifiOutBytes;
+    uint64_t cellInBytes;
+    uint64_t cellOutBytes;
+} PerfNetStats;
+
+@interface InstagramPerfHUDPill : UIView
+@property (nonatomic, strong) UIVisualEffectView *blurView;
+@property (nonatomic, strong) UIView *statusDot;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) NSTimer *pollTimer;
+@property (nonatomic, assign) NSInteger displayMode;
+@property (nonatomic, assign) PerfNetStats lastNetStats;
+@property (nonatomic, assign) NSTimeInterval lastPollTimestamp;
+@property (nonatomic, assign) BOOL isDimmed;
+- (void)startPolling;
+- (void)stopPolling;
+- (void)refreshMetrics;
+@end
+
+@implementation InstagramPerfHUDPill
+
+static float QueryCurrentProcessCPU(void) {
+    kern_return_t kr;
+    thread_array_t threadList;
+    mach_msg_type_number_t threadCount = 0;
+
+    kr = task_threads(mach_task_self(), &threadList, &threadCount);
+    if (kr != KERN_SUCCESS) {
+        return 0.0f;
+    }
+
+    float totalCpu = 0.0f;
+    for (mach_msg_type_number_t i = 0; i < threadCount; i++) {
+        thread_info_data_t thInfo;
+        mach_msg_type_number_t infoCount = THREAD_INFO_MAX;
+        kr = thread_info(threadList[i], THREAD_BASIC_INFO, (thread_info_t)thInfo, &infoCount);
+        if (kr == KERN_SUCCESS) {
+            thread_basic_info_t basicInfo = (thread_basic_info_t)thInfo;
+            if (!(basicInfo->flags & TH_FLAGS_IDLE)) {
+                totalCpu += (basicInfo->cpu_usage / (float)TH_USAGE_SCALE) * 100.0f;
+            }
+        }
+    }
+
+    vm_deallocate(mach_task_self(), (vm_address_t)threadList, threadCount * sizeof(thread_t));
+    return totalCpu;
+}
+
+static float QueryCurrentGPU(void) {
+    static void *s_iokit = NULL;
+    static dispatch_once_t s_once;
+    typedef void* io_service_t;
+    typedef void* io_iterator_t;
+    typedef void* io_registry_entry_t;
+    typedef CFMutableDictionaryRef (*IOServiceMatchingFunc)(const char *name);
+    typedef kern_return_t (*IOServiceGetMatchingServicesFunc)(mach_port_t mainPort, CFDictionaryRef matching, io_iterator_t *existing);
+    typedef io_registry_entry_t (*IOIteratorNextFunc)(io_iterator_t iterator);
+    typedef kern_return_t (*IORegistryEntryCreateCFPropertiesFunc)(io_registry_entry_t entry, CFMutableDictionaryRef *properties, CFAllocatorRef allocator, uint32_t options);
+    typedef kern_return_t (*IOObjectReleaseFunc)(void *object);
+
+    static IOServiceMatchingFunc s_IOServiceMatching = NULL;
+    static IOServiceGetMatchingServicesFunc s_IOServiceGetMatchingServices = NULL;
+    static IOIteratorNextFunc s_IOIteratorNext = NULL;
+    static IORegistryEntryCreateCFPropertiesFunc s_IORegistryEntryCreateCFProperties = NULL;
+    static IOObjectReleaseFunc s_IOObjectRelease = NULL;
+
+    dispatch_once(&s_once, ^{
+        s_iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
+        if (s_iokit) {
+            s_IOServiceMatching = (IOServiceMatchingFunc)dlsym(s_iokit, "IOServiceMatching");
+            s_IOServiceGetMatchingServices = (IOServiceGetMatchingServicesFunc)dlsym(s_iokit, "IOServiceGetMatchingServices");
+            s_IOIteratorNext = (IOIteratorNextFunc)dlsym(s_iokit, "IOIteratorNext");
+            s_IORegistryEntryCreateCFProperties = (IORegistryEntryCreateCFPropertiesFunc)dlsym(s_iokit, "IORegistryEntryCreateCFProperties");
+            s_IOObjectRelease = (IOObjectReleaseFunc)dlsym(s_iokit, "IOObjectRelease");
+        }
+    });
+
+    if (!s_IOServiceMatching || !s_IOServiceGetMatchingServices || !s_IOIteratorNext || !s_IORegistryEntryCreateCFProperties || !s_IOObjectRelease) {
+        return -1.0f;
+    }
+
+    CFMutableDictionaryRef matchDict = s_IOServiceMatching("IOAccelerator");
+    if (!matchDict) return -1.0f;
+
+    io_iterator_t iterator = NULL;
+    kern_return_t kr = s_IOServiceGetMatchingServices(0, matchDict, &iterator);
+    if (kr != KERN_SUCCESS || !iterator) return -1.0f;
+
+    float gpuUsage = -1.0f;
+    io_registry_entry_t entry = NULL;
+    while ((entry = s_IOIteratorNext(iterator)) != NULL) {
+        CFMutableDictionaryRef props = NULL;
+        if (s_IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS && props) {
+            CFDictionaryRef perfStats = (CFDictionaryRef)CFDictionaryGetValue(props, CFSTR("PerformanceStatistics"));
+            if (perfStats && CFGetTypeID(perfStats) == CFDictionaryGetTypeID()) {
+                const CFStringRef keys[] = {
+                    CFSTR("Device Utilization %"),
+                    CFSTR("GPU Core Utilization"),
+                    CFSTR("Renderer Utilization %"),
+                    CFSTR("Tiler Utilization %")
+                };
+                for (size_t k = 0; k < sizeof(keys)/sizeof(keys[0]); k++) {
+                    CFNumberRef num = (CFNumberRef)CFDictionaryGetValue(perfStats, keys[k]);
+                    if (num && CFGetTypeID(num) == CFNumberGetTypeID()) {
+                        int val = 0;
+                        if (CFNumberGetValue(num, kCFNumberIntType, &val)) {
+                            gpuUsage = (float)val;
+                            break;
+                        }
+                    }
+                }
+            }
+            CFRelease(props);
+        }
+        s_IOObjectRelease(entry);
+        if (gpuUsage >= 0.0f) break;
+    }
+    s_IOObjectRelease(iterator);
+    return gpuUsage;
+}
+
+static PerfNetStats QueryCurrentNetStats(void) {
+    PerfNetStats stats = {0, 0, 0, 0};
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) == 0 && interfaces) {
+        struct ifaddrs *ifa = interfaces;
+        while (ifa) {
+            if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_LINK) {
+                struct if_data *ifData = (struct if_data *)ifa->ifa_data;
+                if (ifData) {
+                    const char *name = ifa->ifa_name;
+                    if (strncmp(name, "en", 2) == 0) {
+                        stats.wifiInBytes += ifData->ifi_ibytes;
+                        stats.wifiOutBytes += ifData->ifi_obytes;
+                    } else if (strncmp(name, "pdp_ip", 6) == 0) {
+                        stats.cellInBytes += ifData->ifi_ibytes;
+                        stats.cellOutBytes += ifData->ifi_obytes;
+                    }
+                }
+            }
+            ifa = ifa->ifa_next;
+        }
+        freeifaddrs(interfaces);
+    }
+    return stats;
+}
+
+static NSString *FormatDataRate(double bytesPerSec) {
+    if (bytesPerSec >= 1024.0 * 1024.0) {
+        return [NSString stringWithFormat:@"%.1fM/s", bytesPerSec / (1024.0 * 1024.0)];
+    } else if (bytesPerSec >= 1024.0) {
+        return [NSString stringWithFormat:@"%.0fK/s", bytesPerSec / 1024.0];
+    } else {
+        return [NSString stringWithFormat:@"%.0fB/s", bytesPerSec];
+    }
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _displayMode = 0;
+        _isDimmed = NO;
+        _lastPollTimestamp = [NSDate timeIntervalSinceReferenceDate];
+        _lastNetStats = QueryCurrentNetStats();
+
+        self.backgroundColor = [UIColor colorWithRed:(18.0f/255.0f) green:(18.0f/255.0f) blue:(18.0f/255.0f) alpha:0.88f];
+        self.layer.cornerRadius = 10.0f;
+        self.layer.borderWidth = 1.0f;
+        self.layer.borderColor = [UIColor colorWithRed:(155.0f/255.0f) green:(130.0f/255.0f) blue:(255.0f/255.0f) alpha:0.85f].CGColor;
+        self.clipsToBounds = YES;
+
+        UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
+        _blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
+        _blurView.frame = self.bounds;
+        _blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _blurView.userInteractionEnabled = NO;
+        [self addSubview:_blurView];
+
+        _statusDot = [[UIView alloc] initWithFrame:CGRectMake(8.0f, 7.5f, 5.0f, 5.0f)];
+        _statusDot.layer.cornerRadius = 2.5f;
+        _statusDot.layer.masksToBounds = YES;
+        _statusDot.backgroundColor = [UIColor colorWithRed:(170.0f/255.0f) green:(140.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
+        _statusDot.userInteractionEnabled = NO;
+        [self addSubview:_statusDot];
+
+        _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(17.0f, 0.0f, frame.size.width - 23.0f, 20.0f)];
+        _titleLabel.font = [UIFont systemFontOfSize:9.0f weight:UIFontWeightBold];
+        _titleLabel.textColor = [UIColor whiteColor];
+        _titleLabel.textAlignment = NSTextAlignmentLeft;
+        _titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        _titleLabel.text = @"CPU: -- | GPU: -- | Net: --";
+        _titleLabel.userInteractionEnabled = NO;
+        [self addSubview:_titleLabel];
+
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
+        [self addGestureRecognizer:tap];
+
+        UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
+        longPress.minimumPressDuration = 1.0;
+        [self addGestureRecognizer:longPress];
+
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        [self addGestureRecognizer:pan];
+
+        [self startPolling];
+    }
+    return self;
+}
+
+- (void)startPolling {
+    if (_pollTimer) return;
+    _pollTimer = [NSTimer timerWithTimeInterval:2.0
+                                         target:self
+                                       selector:@selector(refreshMetrics)
+                                       userInfo:nil
+                                        repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:_pollTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)stopPolling {
+    if (_pollTimer) {
+        [_pollTimer invalidate];
+        _pollTimer = nil;
+    }
+}
+
+- (void)dealloc {
+    [self stopPolling];
+}
+
+- (void)refreshMetrics {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    NSTimeInterval elapsed = now - self.lastPollTimestamp;
+    if (elapsed <= 0.0) elapsed = 2.0;
+
+    PerfNetStats prevStats = self.lastNetStats;
+    NSInteger mode = self.displayMode;
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        float cpu = QueryCurrentProcessCPU();
+        float gpu = QueryCurrentGPU();
+        PerfNetStats currentNet = QueryCurrentNetStats();
+
+        uint64_t deltaWifi = (currentNet.wifiInBytes + currentNet.wifiOutBytes) - (prevStats.wifiInBytes + prevStats.wifiOutBytes);
+        uint64_t deltaCell = (currentNet.cellInBytes + currentNet.cellOutBytes) - (prevStats.cellInBytes + prevStats.cellOutBytes);
+
+        double wifiRate = (double)deltaWifi / elapsed;
+        double cellRate = (double)deltaCell / elapsed;
+
+        NSString *netText = nil;
+        if (cellRate > wifiRate && cellRate > 1024.0) {
+            netText = [NSString stringWithFormat:@"Cell: %@", FormatDataRate(cellRate)];
+        } else {
+            netText = [NSString stringWithFormat:@"WiFi: %@", FormatDataRate(wifiRate)];
+        }
+
+        NSString *displayText = nil;
+        if (mode == 1) {
+            if (gpu >= 0.0f) {
+                displayText = [NSString stringWithFormat:@"C:%.0f%% G:%.0f%% %@", cpu, gpu, FormatDataRate(MAX(wifiRate, cellRate))];
+            } else {
+                displayText = [NSString stringWithFormat:@"C:%.0f%% %@", cpu, FormatDataRate(MAX(wifiRate, cellRate))];
+            }
+        } else {
+            if (gpu >= 0.0f) {
+                displayText = [NSString stringWithFormat:@"CPU: %.0f%% | GPU: %.0f%% | %@", cpu, gpu, netText];
+            } else {
+                displayText = [NSString stringWithFormat:@"CPU: %.0f%% | %@", cpu, netText];
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.lastNetStats = currentNet;
+            self.lastPollTimestamp = now;
+            self.titleLabel.text = displayText;
+
+            CGSize fit = [self.titleLabel sizeThatFits:CGSizeMake(360.0f, 20.0f)];
+            CGFloat targetWidth = MAX(110.0f, MIN(360.0f, fit.width + 26.0f));
+
+            CGRect f = self.frame;
+            f.size.width = targetWidth;
+            f.size.height = 20.0f;
+            self.frame = f;
+            self.titleLabel.frame = CGRectMake(17.0f, 0.0f, targetWidth - 23.0f, 20.0f);
+        });
+    });
+}
+
+- (void)handleTap:(UITapGestureRecognizer *)gesture {
+    if (self.isDimmed) {
+        [UIView animateWithDuration:0.25 animations:^{
+            self.alpha = 1.0f;
+        }];
+        self.isDimmed = NO;
+        return;
+    }
+    self.displayMode = (self.displayMode == 0) ? 1 : 0;
+    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [feedback impactOccurred];
+    [self refreshMetrics];
+}
+
+- (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        self.isDimmed = !self.isDimmed;
+        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+        [feedback impactOccurred];
+        [UIView animateWithDuration:0.25 animations:^{
+            self.alpha = self.isDimmed ? 0.25f : 1.0f;
+        }];
+    }
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)pan {
+    UIView *superview = self.superview;
+    if (!superview) return;
+
+    CGPoint translation = [pan translationInView:superview];
+    CGPoint newCenter = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
+
+    CGFloat halfW = self.bounds.size.width / 2.0f;
+    CGFloat halfH = self.bounds.size.height / 2.0f;
+    newCenter.x = MAX(halfW + 6.0f, MIN(superview.bounds.size.width - halfW - 6.0f, newCenter.x));
+    newCenter.y = MAX(halfH + 30.0f, MIN(superview.bounds.size.height - halfH - 30.0f, newCenter.y));
+
+    self.center = newCenter;
+    [pan setTranslation:CGPointZero inView:superview];
+}
+
+@end
+
 @interface InstagramReverbHUDManager ()
+@property (nonatomic, strong) InstagramPerfHUDPill *perfPill;
 @property (nonatomic, strong) InstagramDash1440pPill *dashPill;
 @property (nonatomic, strong) InstagramReverbOverlayWindow *overlayWindow;
 @property (nonatomic, strong) InstagramReverbFloatingButton *floatingButton;
@@ -1231,6 +1578,18 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         } else if (!self.dashPill.superview) {
             [container addSubview:self.dashPill];
             [self.dashPill updateAppearance];
+        }
+
+        // Floating Performance Telemetry Pill right underneath dashPill
+        if (!self.perfPill) {
+            CGFloat perfW = 160.0f;
+            CGFloat perfH = 20.0f;
+            CGFloat initialX = container.bounds.size.width - perfW - 12.0f;
+            CGFloat initialY = 78.0f; // Directly below dashPill (54.0f + 20.0f + 4.0f)
+            self.perfPill = [[InstagramPerfHUDPill alloc] initWithFrame:CGRectMake(initialX, initialY, perfW, perfH)];
+            [container addSubview:self.perfPill];
+        } else if (!self.perfPill.superview) {
+            [container addSubview:self.perfPill];
         }
 
         static BOOL sGestureAdded = NO;
