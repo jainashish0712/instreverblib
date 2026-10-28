@@ -18,6 +18,7 @@
 #import "InstagramReverbUI.h"
 #import "InstagramReverb.h"
 #import "InstagramDash1440p.h"
+#import "InstagramWifiSpoofer.h"
 
 // Accent Color: Vibrant Neon Green #1DB954 for maximum visibility and contrast
 #define ACCENT_COLOR [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:1.0f]
@@ -1277,7 +1278,7 @@ static float QueryCurrentGPU(void) {
 static PerfNetStats QueryCurrentNetStats(void) {
     PerfNetStats stats = {0, 0, 0, 0};
     struct ifaddrs *interfaces = NULL;
-    if (getifaddrs(&interfaces) == 0 && interfaces) {
+    if ((InstagramWifiSpoofer_GetRawIfAddrs ? InstagramWifiSpoofer_GetRawIfAddrs(&interfaces) : getifaddrs(&interfaces)) == 0 && interfaces) {
         struct ifaddrs *ifa = interfaces;
         while (ifa) {
             if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_LINK) {
@@ -1403,7 +1404,9 @@ static NSString *FormatDataRate(double bytesPerSec) {
         double cellRate = (double)deltaCell / elapsed;
 
         NSString *netText = nil;
-        if (cellRate > wifiRate && cellRate > 1024.0) {
+        if (InstagramWifiSpoofer_IsCellularData()) {
+            netText = [NSString stringWithFormat:@"Cell: %@", FormatDataRate(cellRate > 0.0 ? cellRate : (wifiRate > 0.0 ? wifiRate : 0.0))];
+        } else if (cellRate > wifiRate && cellRate > 1024.0) {
             netText = [NSString stringWithFormat:@"Cell: %@", FormatDataRate(cellRate)];
         } else {
             netText = [NSString stringWithFormat:@"WiFi: %@", FormatDataRate(wifiRate)];

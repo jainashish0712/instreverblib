@@ -12,6 +12,7 @@
 #define InstagramWifiSpoofer_h
 
 #import <Foundation/Foundation.h>
+#import <ifaddrs.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,12 @@ void InstagramWifiSpoofer_Init(void);
 
 // Returns YES if the spoofer is currently active
 BOOL InstagramWifiSpoofer_IsActive(void);
+
+// Returns YES if the underlying physical network connection is Cellular Data (WWAN)
+BOOL InstagramWifiSpoofer_IsCellularData(void);
+
+// Raw getifaddrs accessing true system network interfaces
+int InstagramWifiSpoofer_GetRawIfAddrs(struct ifaddrs **ifap);
 
 #ifdef __cplusplus
 }

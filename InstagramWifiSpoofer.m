@@ -512,6 +512,59 @@ BOOL InstagramWifiSpoofer_IsActive(void) {
     return YES;
 }
 
+int InstagramWifiSpoofer_GetRawIfAddrs(struct ifaddrs **ifap) {
+    if (orig_getifaddrs) {
+        return orig_getifaddrs(ifap);
+    }
+    return getifaddrs(ifap);
+}
+
+BOOL InstagramWifiSpoofer_IsCellularData(void) {
+    // 1. Query underlying system reachability flags using the original unhooked function
+    struct sockaddr_in zeroAddress;
+    bzero(&zeroAddress, sizeof(zeroAddress));
+    zeroAddress.sin_len = sizeof(zeroAddress);
+    zeroAddress.sin_family = AF_INET;
+
+    SCNetworkReachabilityRef target = SCNetworkReachabilityCreateWithAddress(kCFAllocatorDefault, (const struct sockaddr *)&zeroAddress);
+    if (target) {
+        SCNetworkReachabilityFlags flags = 0;
+        Boolean res = false;
+        if (orig_SCNetworkReachabilityGetFlags) {
+            res = orig_SCNetworkReachabilityGetFlags(target, &flags);
+        } else {
+            res = SCNetworkReachabilityGetFlags(target, &flags);
+        }
+        CFRelease(target);
+        if (res && (flags & kSCNetworkReachabilityFlagsReachable)) {
+            if (flags & kSCNetworkReachabilityFlagsIsWWAN) {
+                return YES;
+            }
+            return NO;
+        }
+    }
+
+    // 2. Fallback check via raw unaliased network interfaces
+    struct ifaddrs *interfaces = NULL;
+    int (*real_getifaddrs)(struct ifaddrs **) = orig_getifaddrs ? orig_getifaddrs : getifaddrs;
+    if (real_getifaddrs && real_getifaddrs(&interfaces) == 0 && interfaces) {
+        BOOL hasWifi = NO;
+        BOOL hasCell = NO;
+        for (struct ifaddrs *ifa = interfaces; ifa != NULL; ifa = ifa->ifa_next) {
+            if (ifa->ifa_addr && (ifa->ifa_addr->sa_family == AF_INET || ifa->ifa_addr->sa_family == AF_INET6)) {
+                if (strncmp(ifa->ifa_name, "en0", 3) == 0) {
+                    hasWifi = YES;
+                } else if (strncmp(ifa->ifa_name, "pdp_ip", 6) == 0) {
+                    hasCell = YES;
+                }
+            }
+        }
+        freeifaddrs(interfaces);
+        if (hasCell && !hasWifi) return YES;
+    }
+    return NO;
+}
+
 __attribute__((constructor))
 static void InstagramWifiSpooferAutoInit(void) {
     InstagramWifiSpoofer_Init();

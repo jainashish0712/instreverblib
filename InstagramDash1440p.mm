@@ -17,6 +17,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import "fishhook.h"
 #import "InstagramDash1440p.h"
+#import "InstagramWifiSpoofer.h"
 
 NSString * const kInstagramDash1440pStateDidChangeNotification = @"kInstagramDash1440pStateDidChangeNotification";
 
@@ -406,6 +407,10 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
     id rep1080p = nil;
     uint64_t maxBw1080p = 0;
 
+    id repHighestUnder1440 = nil;
+    uint64_t maxPixelsUnder1440 = 0;
+    uint64_t maxBwUnder1440 = 0;
+
     id repHighest = nil;
     uint64_t maxPixelsGeneral = 0;
     uint64_t maxBwGeneral = 0;
@@ -425,7 +430,7 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
         NSString *encodingTag = GetRepresentationEncodingTag(rep);
 
         BOOL is1440 = (minDim >= 1200.0f || maxDim >= 2200.0f || pixels >= 2800000ULL ||
-                       (repId && ([repId containsString:@"1440"] || [repId containsString:@"2k"])) ||
+                       (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"968238693007748"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])) ||
                        (encodingTag && ([encodingTag containsString:@"1440"] || [encodingTag containsString:@"2k"])));
 
         BOOL is1080 = (!is1440 && (minDim >= 960.0f || maxDim >= 1700.0f || pixels >= 1600000ULL ||
@@ -451,7 +456,19 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
             }
         }
 
-        // 3. Evaluate general max pool for non-HD edge cases
+        // 3. Track highest resolution under 1440p (cellular max-cap ceiling)
+        if (!is1440) {
+            if (pixels > maxPixelsUnder1440) {
+                maxPixelsUnder1440 = pixels;
+                maxBwUnder1440 = bw;
+                repHighestUnder1440 = rep;
+            } else if (pixels == maxPixelsUnder1440 && bw > maxBwUnder1440) {
+                maxBwUnder1440 = bw;
+                repHighestUnder1440 = rep;
+            }
+        }
+
+        // 4. Evaluate general max pool for non-HD edge cases
         if (pixels > maxPixelsGeneral) {
             maxPixelsGeneral = pixels;
             maxBwGeneral = bw;
@@ -462,8 +479,17 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
         }
     }
 
-    // Strict hierarchy: 1440p -> 1080p -> Max available
-    id chosen = rep1440p ?: rep1080p ?: repHighest ?: representations.firstObject;
+    BOOL isCellular = InstagramWifiSpoofer_IsCellularData();
+    id chosen = nil;
+    if (isCellular) {
+        // ONLY ON CELLULAR DATA: Make 1080p preferred and max (1440p is bigger to handle)
+        chosen = rep1080p ?: repHighestUnder1440 ?: rep1440p ?: representations.firstObject;
+        DashLog(@"[Quality Selector] Cellular data active: 1080p Preferred & Max selected: %@", chosen);
+    } else {
+        // Wi-Fi connection active: 1440p Priority, 1080p Fallback Floor
+        chosen = rep1440p ?: rep1080p ?: repHighest ?: representations.firstObject;
+        DashLog(@"[Quality Selector] Wi-Fi connection active: 1440p Priority selected: %@", chosen);
+    }
     return chosen;
 }
 
