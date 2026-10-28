@@ -13,6 +13,9 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <time.h>
+#import <dlfcn.h>
+#import <CoreMedia/CoreMedia.h>
+#import "fishhook.h"
 #import "InstagramDash1440p.h"
 
 NSString * const kInstagramDash1440pStateDidChangeNotification = @"kInstagramDash1440pStateDidChangeNotification";
@@ -583,9 +586,123 @@ static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteg
     return nil;
 }
 
-// Hooks for VideoToolbox VP9 Hardware Activation
-static BOOL Hook_ReturnYES(id self, SEL _cmd) {
-    return YES;
+// ============================================================================
+// Hardware VP9 Decoding via VideoToolbox
+// ============================================================================
+
+typedef struct OpaqueVTDecompressionSession* VTDecompressionSessionRef;
+
+static OSStatus (*orig_VTDecompressionSessionCreate)(
+    CFAllocatorRef allocator,
+    CMVideoFormatDescriptionRef videoFormatDescription,
+    CFDictionaryRef videoDecoderSpecification,
+    CFDictionaryRef destinationImageBufferAttributes,
+    const void *outputCallback,
+    VTDecompressionSessionRef *decompressionSessionOut) = NULL;
+
+static OSStatus Hook_VTDecompressionSessionCreate(
+    CFAllocatorRef allocator,
+    CMVideoFormatDescriptionRef videoFormatDescription,
+    CFDictionaryRef videoDecoderSpecification,
+    CFDictionaryRef destinationImageBufferAttributes,
+    const void *outputCallback,
+    VTDecompressionSessionRef *decompressionSessionOut) {
+
+    CFMutableDictionaryRef decoderSpec = NULL;
+    if (videoDecoderSpecification) {
+        decoderSpec = CFDictionaryCreateMutableCopy(allocator, 0, videoDecoderSpecification);
+    } else {
+        decoderSpec = CFDictionaryCreateMutable(allocator, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    }
+
+    if (decoderSpec) {
+        // Enforce Apple Silicon hardware video decoder specification for high-bitrate VP9 streams
+        CFDictionarySetValue(decoderSpec, CFSTR("EnableHardwareAcceleratedVideoDecoder"), kCFBooleanTrue);
+    }
+
+    OSStatus status = noErr;
+    if (orig_VTDecompressionSessionCreate) {
+        status = orig_VTDecompressionSessionCreate(
+            allocator,
+            videoFormatDescription,
+            decoderSpec ? decoderSpec : videoDecoderSpecification,
+            destinationImageBufferAttributes,
+            outputCallback,
+            decompressionSessionOut);
+    }
+
+    if (decoderSpec) {
+        CFRelease(decoderSpec);
+    }
+
+    if (status == noErr && decompressionSessionOut && *decompressionSessionOut) {
+        typedef OSStatus (*VTSessionSetPropertyFunc)(VTDecompressionSessionRef, CFStringRef, CFTypeRef);
+        static VTSessionSetPropertyFunc s_setPropFunc = NULL;
+        static dispatch_once_t propOnce;
+        dispatch_once(&propOnce, ^{
+            s_setPropFunc = (VTSessionSetPropertyFunc)dlsym(RTLD_DEFAULT, "VTSessionSetProperty");
+        });
+
+        if (s_setPropFunc) {
+            // Guarantee real-time presentation deadlines to prevent frame dropping during 1440p DASH streaming
+            s_setPropFunc(*decompressionSessionOut, CFSTR("RealTime"), kCFBooleanTrue);
+        }
+    }
+
+    return status;
+}
+
+static void HookVTDecompressionSessionCreateOnce(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        struct rebinding rebindings[] = {
+            {
+                "VTDecompressionSessionCreate",
+                (void *)Hook_VTDecompressionSessionCreate,
+                (void **)&orig_VTDecompressionSessionCreate
+            }
+        };
+        rebind_symbols(rebindings, 1);
+    });
+}
+
+// ----------------------------------------------------------------------------
+// FNF VP9 Session Decompression Hook
+// ----------------------------------------------------------------------------
+
+static id (*orig_vp9x_init)(id self, SEL _cmd, id delegate, void *formatDesc, CGSize videoSize, BOOL async, void *config, id pcm, NSError **error) = NULL;
+
+static id Hook_FNFDecompressionSessionForVP9X_Init(id self, SEL _cmd, id delegate, void *formatDesc, CGSize videoSize, BOOL async, void *config, id pcm, NSError **error) {
+    if (config) {
+        uint8_t *cfg = (uint8_t *)config;
+        // Verified FNFDecompressionConfig byte offsets from FBSharedFramework disassembly:
+        // [0x59] enableVTForVP9: 1 -> Selects native VideoToolbox hardware decode path
+        // [0x58] enableVTHWAcceleratedDetection: 1 -> Enables hardware engine probing
+        // [0x74] fixVP9DecoderRegistrationRace: 1 -> Prevents concurrent decoder init race
+        // [0x38] enableVP9VTDecodingDimensionCheck: 0 -> Bypass resolution cap for 1440p
+        // [0x33] disableVTAsynchronousDecompression: 0 -> Keep async hardware decompression enabled
+        // [0x34] disableVT1xRealTimePlayback: 0 -> Keep real-time 60fps presentation
+        // [0x35] disableVTTemporalProcessing: 0
+        cfg[0x59] = 1;
+        cfg[0x58] = 1;
+        cfg[0x74] = 1;
+        cfg[0x38] = 0;
+        cfg[0x33] = 0;
+        cfg[0x34] = 0;
+        cfg[0x35] = 0;
+    }
+
+    if (orig_vp9x_init) {
+        return orig_vp9x_init(self, _cmd, delegate, formatDesc, videoSize, async, config, pcm, error);
+    }
+    return nil;
+}
+
+static BOOL (*orig_vp9x_usesSoftwareDecoder)(id self, SEL _cmd) = NULL;
+
+static BOOL Hook_FNFDecompressionSessionForVP9X_UsesSoftwareDecoder(id self, SEL _cmd) {
+    // Hardware accelerated via VideoToolbox
+    return NO;
 }
 
 static BOOL Hook_ReturnNO(id self, SEL _cmd, id rep, BOOL isIntentional) {
@@ -686,16 +803,17 @@ static void SwizzleDashClasses(void) {
                           (IMP)Hook_ReturnNO, NULL);
     }
 
-    // 4. VideoToolbox VP9 Hardware Activation
-    const char *vp9Classes[] = {
-        "FNFPlayerConfig",
-        "FNFDecompressionConfig"
-    };
-    for (size_t i = 0; i < sizeof(vp9Classes) / sizeof(vp9Classes[0]); i++) {
-        Class vCls = objc_getClass(vp9Classes[i]);
-        if (!vCls) continue;
-        LogClassMethods(vCls);
-        SafeSwizzleMethod(vCls, sel_registerName("enableVTForVP9"), (IMP)Hook_ReturnYES, NULL);
+    // 4. Force Apple VideoToolbox Hardware VP9 Decoder
+    Class vp9xCls = objc_getClass("FNFDecompressionSessionForVP9X");
+    if (vp9xCls) {
+        SafeSwizzleMethod(vp9xCls,
+                          sel_registerName("initWithDelegate:sampleBufferFormatDescription:videoSize:async:config:playerConfigManager:error:"),
+                          (IMP)Hook_FNFDecompressionSessionForVP9X_Init,
+                          (IMP *)&orig_vp9x_init);
+        SafeSwizzleMethod(vp9xCls,
+                          sel_registerName("usesSoftwareDecoder"),
+                          (IMP)Hook_FNFDecompressionSessionForVP9X_UsesSoftwareDecoder,
+                          (IMP *)&orig_vp9x_usesSoftwareDecoder);
     }
 
     // 5. Active Telemetry Observers
@@ -730,6 +848,7 @@ void InstagramDash1440p_Init(void) {
         DashLog(@"Apple VideoToolbox VP9 Hardware/Hybrid Decoder Enabled");
         DashLog(@"==================================================================");
 
+        HookVTDecompressionSessionCreateOnce();
         ApplyAllDash1440pSwizzles();
 
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
