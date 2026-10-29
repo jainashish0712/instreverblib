@@ -134,11 +134,12 @@ def test_codebase_isolation():
     assert "UpdateActiveRepresentation" not in src, "Found stale UpdateActiveRepresentation in source code!"
     print("   -> PASS: Stale UpdateActiveRepresentation completely eliminated")
     
-    # Check that root manifest pruning and defaultRepresentationForTrack are present
+    # Check that root manifest pruning is present and obsolete runtime playlist hooks are retired
     assert "PruneManifestXml" in src
-    assert "Hook_Playlist_DefaultRepresentationForTrack" in src
+    assert "Hook_Playlist_RepresentationsForTrack" not in src
+    assert "Hook_Playlist_DefaultRepresentationForTrack" not in src
     assert "UpdateActivePlaybackTelemetryFromPlayer" in src
-    print("   -> PASS: Root manifest pruner and default representation hook do not pollute active telemetry")
+    print("   -> PASS: Root manifest pruner is active and obsolete runtime playlist hooks are cleanly retired")
 
 def test_video_player_swizzles():
     print("[4/5] Testing IGFNFVideoPlayer swizzle coverage...")
@@ -209,7 +210,7 @@ def test_cellular_vs_wifi_selection():
     with open("InstagramDash1440p.mm", "r", encoding="utf-8") as f:
         dash_src = f.read()
     assert "InstagramWifiSpoofer_IsCellularData" in dash_src
-    assert "repHighestUnder1440" in dash_src
+    assert "mode == InstagramDash1440pModeWifiOnly && isCellular" in dash_src
     print("   -> InstagramDash1440p.mm cellular branch verified in source: PASS")
 
 if __name__ == "__main__":
