@@ -498,6 +498,9 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
 // 5. Reset Defaults Button
 @property (nonatomic, strong) UIButton *resetBtn;
+
+// 6. Hide / Show Badges Button (Below Reset to Defaults)
+@property (nonatomic, strong) UIButton *hideBadgesBtn;
 @property (nonatomic, copy) void (^closeHandler)(void);
 
 - (void)refreshValues;
@@ -692,6 +695,16 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         [_resetBtn addTarget:self action:@selector(resetTapped) forControlEvents:UIControlEventTouchUpInside];
         [_contentContainer addSubview:_resetBtn];
 
+        // 6. Hide / Show Badges Button (Compact, Below Reset Defaults)
+        _hideBadgesBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        [_hideBadgesBtn setTitle:@"Hide Badges" forState:UIControlStateNormal];
+        [_hideBadgesBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
+        _hideBadgesBtn.titleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightMedium];
+        _hideBadgesBtn.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.07f];
+        _hideBadgesBtn.layer.cornerRadius = 5.0f;
+        [_hideBadgesBtn addTarget:self action:@selector(toggleBadgesTapped) forControlEvents:UIControlEventTouchUpInside];
+        [_contentContainer addSubview:_hideBadgesBtn];
+
         // Draggable Pan Gesture for HUD (without interfering with sliders or buttons)
         UIPanGestureRecognizer *hudPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         hudPan.delegate = self;
@@ -747,20 +760,20 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     CGFloat pad = 10.0f;
     CGFloat w = self.bounds.size.width - (pad * 2.0f);
 
-    // Header (y = 8.0f)
-    CGFloat y = 8.0f;
-    _titleLabel.frame = CGRectMake(pad, y, w - 55.0f, 20.0f);
-    _enableSwitch.center = CGPointMake(self.bounds.size.width - pad - 34.0f, y + 10.0f);
-    _closeBtn.frame = CGRectMake(self.bounds.size.width - pad - 16.0f, y, 16.0f, 20.0f);
+    // Header (y = 6.0f)
+    CGFloat y = 6.0f;
+    _titleLabel.frame = CGRectMake(pad, y, w - 55.0f, 18.0f);
+    _enableSwitch.center = CGPointMake(self.bounds.size.width - pad - 34.0f, y + 9.0f);
+    _closeBtn.frame = CGRectMake(self.bounds.size.width - pad - 16.0f, y, 16.0f, 18.0f);
 
-    y += 24.0f;
+    y += 21.0f;
     _separator.frame = CGRectMake(pad, y, w, 0.5f);
-    y += 5.0f;
+    y += 4.0f;
 
-    CGFloat rowH = 15.0f;
-    CGFloat sliderH = 16.0f;
-    CGFloat rowSpacing = 2.0f;
-    CGFloat blockGap = 5.0f;
+    CGFloat rowH = 14.0f;
+    CGFloat sliderH = 15.0f;
+    CGFloat rowSpacing = 1.5f;
+    CGFloat blockGap = 4.0f;
 
     CGFloat labelW = 40.0f;
     CGFloat btnW = 15.0f;
@@ -805,7 +818,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     _volumeValLabel.frame = CGRectMake(valX, y, valW, rowH);
     y += rowH + rowSpacing;
     _volumeView.frame = CGRectMake(pad, y, w, sliderH);
-    y += sliderH + 6.0f;
+    y += sliderH + 4.0f;
 
     // Ensure volume subview slider has correct compact thumb, tint, and touch listener
     UIImage *thumb = CreateCompactThumb(11.0f);
@@ -821,7 +834,11 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     }
 
     // 5. Reset Defaults Button
-    _resetBtn.frame = CGRectMake(pad, y, w, 22.0f);
+    _resetBtn.frame = CGRectMake(pad, y, w, 20.0f);
+    y += 20.0f + 3.0f;
+
+    // 6. Hide Badges Button (Below Reset Defaults)
+    _hideBadgesBtn.frame = CGRectMake(pad, y, w, 20.0f);
 }
 
 - (void)refreshValues {
@@ -852,6 +869,10 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         }
     }
     self.volumeValLabel.text = [NSString stringWithFormat:@"%.0f%%", currentVol * 100.0f];
+
+    // Hide / Show Badges Status
+    BOOL badgesHidden = [[InstagramReverbHUDManager sharedManager] areBadgesHidden];
+    [self.hideBadgesBtn setTitle:(badgesHidden ? @"Show Badges" : @"Hide Badges") forState:UIControlStateNormal];
 }
 
 // ----------------------------------------------------------------------------
@@ -977,6 +998,13 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 // ----------------------------------------------------------------------------
 - (void)resetTapped {
     InstagramReverb_ResetDefaults();
+    [self refreshValues];
+}
+
+- (void)toggleBadgesTapped {
+    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [feedback impactOccurred];
+    [[InstagramReverbHUDManager sharedManager] toggleBadgesHidden];
     [self refreshValues];
 }
 
@@ -1506,6 +1534,7 @@ static NSString *FormatDataRate(double bytesPerSec) {
 @property (nonatomic, strong) InstagramReverbVolumeBar *volumeBar;
 @property (nonatomic, strong) InstagramReverbHUDView *hudView;
 @property (nonatomic, assign) BOOL isHUDVisible;
+@property (nonatomic, assign) BOOL areBadgesHidden;
 @end
 
 @implementation InstagramReverbHUDManager
@@ -1523,8 +1552,46 @@ static NSString *FormatDataRate(double bytesPerSec) {
     self = [super init];
     if (self) {
         _isHUDVisible = NO;
+        _areBadgesHidden = [[NSUserDefaults standardUserDefaults] boolForKey:@"InstagramReverb_BadgesHidden"];
     }
     return self;
+}
+
+- (BOOL)areBadgesHidden {
+    return _areBadgesHidden;
+}
+
+- (void)setBadgesHidden:(BOOL)hidden {
+    _areBadgesHidden = hidden;
+    [[NSUserDefaults standardUserDefaults] setBool:hidden forKey:@"InstagramReverb_BadgesHidden"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+
+    if (hidden) {
+        [self.perfPill stopPolling];
+    } else {
+        [self.perfPill startPolling];
+    }
+
+    if (hidden) {
+        [UIView animateWithDuration:0.25 animations:^{
+            self.dashPill.alpha = 0.0f;
+            self.perfPill.alpha = 0.0f;
+        } completion:^(BOOL finished) {
+            self.dashPill.hidden = YES;
+            self.perfPill.hidden = YES;
+        }];
+    } else {
+        self.dashPill.hidden = NO;
+        self.perfPill.hidden = NO;
+        [UIView animateWithDuration:0.25 animations:^{
+            self.dashPill.alpha = 1.0f;
+            self.perfPill.alpha = 1.0f;
+        }];
+    }
+}
+
+- (void)toggleBadgesHidden {
+    [self setBadgesHidden:!_areBadgesHidden];
 }
 
 - (UIWindowScene *)findActiveWindowScene {
@@ -1614,9 +1681,17 @@ static NSString *FormatDataRate(double bytesPerSec) {
             CGFloat initialX = container.bounds.size.width - pillW - 12.0f;
             CGFloat initialY = 54.0f; // Below status bar notch
             self.dashPill = [[InstagramDash1440pPill alloc] initWithFrame:CGRectMake(initialX, initialY, pillW, pillH)];
+            if (self.areBadgesHidden) {
+                self.dashPill.alpha = 0.0f;
+                self.dashPill.hidden = YES;
+            }
             [container addSubview:self.dashPill];
             [self.dashPill updateAppearance];
         } else if (!self.dashPill.superview) {
+            if (self.areBadgesHidden) {
+                self.dashPill.alpha = 0.0f;
+                self.dashPill.hidden = YES;
+            }
             [container addSubview:self.dashPill];
             [self.dashPill updateAppearance];
         }
@@ -1628,8 +1703,18 @@ static NSString *FormatDataRate(double bytesPerSec) {
             CGFloat initialX = container.bounds.size.width - perfW - 12.0f;
             CGFloat initialY = 78.0f; // Directly below dashPill (54.0f + 20.0f + 4.0f)
             self.perfPill = [[InstagramPerfHUDPill alloc] initWithFrame:CGRectMake(initialX, initialY, perfW, perfH)];
+            if (self.areBadgesHidden) {
+                self.perfPill.alpha = 0.0f;
+                self.perfPill.hidden = YES;
+                [self.perfPill stopPolling];
+            }
             [container addSubview:self.perfPill];
         } else if (!self.perfPill.superview) {
+            if (self.areBadgesHidden) {
+                self.perfPill.alpha = 0.0f;
+                self.perfPill.hidden = YES;
+                [self.perfPill stopPolling];
+            }
             [container addSubview:self.perfPill];
         }
 

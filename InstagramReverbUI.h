@@ -18,6 +18,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)hideHUD;
 - (void)toggleHUD;
 
+// Badges visibility control (DASH Quality & Performance Telemetry)
+- (BOOL)areBadgesHidden;
+- (void)setBadgesHidden:(BOOL)hidden;
+- (void)toggleBadgesHidden;
+
 @end
 
 NS_ASSUME_NONNULL_END
