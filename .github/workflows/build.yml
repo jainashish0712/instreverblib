@@ -2,7 +2,7 @@ name: Build InstagramReverb Dylib
 
 on:
   push:
-    branches: [ main, master, dev,1440p-try-2, "**" ]
+    branches: [ main, master, dev, 1440p-try-2, "**" ]
   pull_request:
   workflow_dispatch:
 
@@ -22,23 +22,32 @@ jobs:
         run: |
           chmod +x build.sh
           ./build.sh
+          ls -lh InstagramReverb.dylib
+          file InstagramReverb.dylib
 
-      - name: Publish Direct Raw Dylib (Rolling 'latest' Release - No Zip)
-        if: github.event_name == 'push'
+      - name: Release Dylib (After Build Action Complete)
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          BUILD_TAG="v${{ github.run_number }}"
+          
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Tag this specific build
+          git tag -f "$BUILD_TAG" HEAD
+          git push origin -f tag "$BUILD_TAG" || true
+          
+          # Also update rolling latest tag
           git tag -f latest HEAD
-          git push origin -f tag latest
-          gh release delete latest --yes || true
-          gh release create latest InstagramReverb.dylib \
-            --title "Latest Development Build" \
-            --notes "Continuous build of InstagramReverb.dylib (raw uncompressed binary for LiveContainer)."
-
-      - name: Upload Dylib Artifact (Fallback)
-        uses: actions/upload-artifact@v4
-        with:
-          name: InstagramReverb.dylib
-          path: InstagramReverb.dylib
+          git push origin -f tag latest || true
+          
+          # Delete pre-existing release with this tag if re-run
+          gh release delete "$BUILD_TAG" --yes || true
+          
+          # Create GitHub Release with direct raw uncompressed dylib
+          gh release create "$BUILD_TAG" InstagramReverb.dylib \
+            --title "InstagramReverb Build #${{ github.run_number }}" \
+            --notes "Continuous build of InstagramReverb.dylib (commit ${{ github.sha }}). Direct uncompressed binary for LiveContainer, TrollStore, or Sideloading." \
+            --latest

@@ -1,6 +1,6 @@
 // InstagramDash1440p.mm
 // Ultra High-Definition (1440p / 2K) VP9 DASH Video Streaming Engine for Instagram
-// Forces 1440p DASH video playback with strict 1080p fallback for active Reels & feed prefetchers
+// Forces 1440p DASH video playback via Root-Level Manifest Pruning & Hardware VP9 Decoding
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -21,52 +21,80 @@
 
 NSString * const kInstagramDash1440pStateDidChangeNotification = @"kInstagramDash1440pStateDidChangeNotification";
 
-static BOOL g_dash1440pEnabled = YES;
+// Default: Mode 1 (Wi-Fi 1440p, Cellular 1080p ceiling)
+static InstagramDash1440pMode g_dashMode = InstagramDash1440pModeWifiOnly;
 static BOOL g_isActual1440p = NO;
 static NSString *g_currentQuality = @"1440p";
 static NSString *g_currentResolution = @"";
 static NSString *g_currentRepresentationId = @"ready";
 static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
 
-// ============================================================================
-// Zero-Overhead Logging Stub (Disabled for Stutter-Free 1440p Playback)
-// ============================================================================
-
+// Zero-overhead logging stub
 #define DashLog(...) do {} while(0)
 
 // ============================================================================
 // Public Control & Telemetry Interfaces
 // ============================================================================
 
-BOOL InstagramDash1440p_IsEnabled(void) {
+InstagramDash1440pMode InstagramDash1440p_GetMode(void) {
     pthread_mutex_lock(&g_stateMutex);
-    BOOL enabled = g_dash1440pEnabled;
+    InstagramDash1440pMode m = g_dashMode;
     pthread_mutex_unlock(&g_stateMutex);
-    return enabled;
+    return m;
+}
+
+void InstagramDash1440p_SetMode(InstagramDash1440pMode mode) {
+    pthread_mutex_lock(&g_stateMutex);
+    g_dashMode = mode;
+    pthread_mutex_unlock(&g_stateMutex);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
+    });
+}
+
+InstagramDash1440pMode InstagramDash1440p_CycleMode(void) {
+    pthread_mutex_lock(&g_stateMutex);
+    if (g_dashMode == InstagramDash1440pModeWifiOnly) {
+        g_dashMode = InstagramDash1440pModeAlways1440p;
+    } else if (g_dashMode == InstagramDash1440pModeAlways1440p) {
+        g_dashMode = InstagramDash1440pModeDisabled;
+    } else {
+        g_dashMode = InstagramDash1440pModeWifiOnly;
+    }
+    InstagramDash1440pMode newMode = g_dashMode;
+    pthread_mutex_unlock(&g_stateMutex);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
+    });
+    return newMode;
+}
+
+NSString *InstagramDash1440p_GetModeName(void) {
+    InstagramDash1440pMode m = InstagramDash1440p_GetMode();
+    switch (m) {
+        case InstagramDash1440pModeWifiOnly:
+            return @"WiFi 1440p (Cell 1080p)";
+        case InstagramDash1440pModeAlways1440p:
+            return @"All 1440p (WiFi+Cell)";
+        case InstagramDash1440pModeDisabled:
+            return @"Disabled (IG Default)";
+    }
+    return @"Unknown";
+}
+
+BOOL InstagramDash1440p_IsEnabled(void) {
+    return InstagramDash1440p_GetMode() != InstagramDash1440pModeDisabled;
 }
 
 void InstagramDash1440p_SetEnabled(BOOL enabled) {
-    pthread_mutex_lock(&g_stateMutex);
-    g_dash1440pEnabled = enabled;
-    pthread_mutex_unlock(&g_stateMutex);
-
-    DashLog(@"1440p DASH Engine Toggled: %@", enabled ? @"ENABLED" : @"DISABLED");
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
-    });
+    InstagramDash1440p_SetMode(enabled ? InstagramDash1440pModeWifiOnly : InstagramDash1440pModeDisabled);
 }
 
 BOOL InstagramDash1440p_ToggleEnabled(void) {
-    pthread_mutex_lock(&g_stateMutex);
-    g_dash1440pEnabled = !g_dash1440pEnabled;
-    BOOL newState = g_dash1440pEnabled;
-    pthread_mutex_unlock(&g_stateMutex);
-
-    DashLog(@"1440p DASH Engine Toggled: %@", newState ? @"ENABLED" : @"DISABLED");
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
-    });
-    return newState;
+    InstagramDash1440pMode m = InstagramDash1440p_CycleMode();
+    return m != InstagramDash1440pModeDisabled;
 }
 
 BOOL InstagramDash1440p_IsActual1440p(void) {
@@ -110,14 +138,12 @@ NSString *InstagramDash1440p_GetLogFilePath(void) {
 static id ExtractRepresentationFromObject(id obj) {
     if (!obj) return nil;
 
-    // Check if obj itself is a representation
     if ([obj respondsToSelector:@selector(representationId)] ||
         [obj respondsToSelector:@selector(videoSize)] ||
         [obj respondsToSelector:@selector(bandwidth)]) {
         return obj;
     }
 
-    // Check selection metadata wrappers
     SEL selectors[] = {
         sel_registerName("selectedRepresentation"),
         sel_registerName("selectedRep"),
@@ -134,7 +160,6 @@ static id ExtractRepresentationFromObject(id obj) {
         }
     }
 
-    // Safe KVC fallback
     const char *keys[] = {"selectedRepresentation", "selectedRep", "representation", "videoRepresentation"};
     for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
         @try {
@@ -159,7 +184,7 @@ static BOOL IsAudioRepresentation(id rep) {
     }
     if ([actual respondsToSelector:@selector(track)]) {
         NSInteger tr = ((NSInteger (*)(id, SEL))objc_msgSend)(actual, @selector(track));
-        if (tr == 1) return YES; // In FNF, track 1 is Audio, track 0 is Video
+        if (tr == 1) return YES; // 1 is Audio, 0 is Video
     }
     if ([actual respondsToSelector:@selector(representationId)]) {
         NSString *repId = ((NSString *(*)(id, SEL))objc_msgSend)(actual, @selector(representationId));
@@ -276,7 +301,6 @@ static pthread_mutex_t g_playerMutex = PTHREAD_MUTEX_INITIALIZER;
 static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrideRepId, NSString *overrideTag) {
     if (!player) return;
 
-    // Check if the player is currently playing
     BOOL isPlaying = NO;
     if ([player respondsToSelector:@selector(isPlaying)]) {
         @try {
@@ -284,7 +308,6 @@ static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrid
         } @catch (...) {}
     }
 
-    // Check if the player's video view is in the visible window hierarchy
     BOOL isOnScreen = NO;
     if ([player respondsToSelector:@selector(videoView)]) {
         @try {
@@ -295,23 +318,20 @@ static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrid
         } @catch (...) {}
     }
 
-    // Strict Guard: Badge must strictly show ONLY currently playing reel and NEVER next/offscreen reel.
-    // If not playing and not on screen, this player is strictly offscreen/prefetch/idle. Reject!
     pthread_mutex_lock(&g_playerMutex);
     id active = g_activePlayingPlayer;
 
     if (isPlaying) {
         g_activePlayingPlayer = player;
     } else if (isOnScreen && active == player) {
-        // Current visible reel is paused; retain active tracking
+        // Paused active visible reel; retain active tracking
     } else {
-        // Offscreen, prefetching, or non-active background player: STRICTLY REJECT!
+        // Offscreen, prefetch, or idle player: reject
         pthread_mutex_unlock(&g_playerMutex);
         return;
     }
     pthread_mutex_unlock(&g_playerMutex);
 
-    // Extract representation ID
     NSString *repId = overrideRepId;
     if (!repId || repId.length == 0) {
         if ([player respondsToSelector:@selector(currentRepresentationId)]) {
@@ -322,7 +342,6 @@ static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrid
     }
     if (!repId || repId.length == 0) return;
 
-    // Extract video size
     CGSize sz = CGSizeZero;
     if ([player respondsToSelector:@selector(currentVideoSize)]) {
         @try {
@@ -330,7 +349,6 @@ static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrid
         } @catch (...) {}
     }
 
-    // Extract encoding tag
     NSString *tag = overrideTag;
     if (!tag && [player respondsToSelector:@selector(_currentVideoEncodingTag)]) {
         @try {
@@ -339,7 +357,6 @@ static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrid
     }
 
     uint64_t bw = 0;
-    // If size was not yet populated on player, lookup in representation metadata cache
     if (sz.width <= 0.0f || sz.height <= 0.0f) {
         pthread_mutex_lock(&g_cacheMutex);
         NSDictionary *dict = g_repMetadataCache[repId];
@@ -385,7 +402,6 @@ static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrid
     pthread_mutex_unlock(&g_stateMutex);
 
     if (changed) {
-        DashLog(@"[Active Playing Reel Telemetry] On-screen reel: Quality=%@ (%@, %@, %llu bps)", quality, resolution, repId, bw);
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
         });
@@ -393,12 +409,238 @@ static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrid
 }
 
 // ============================================================================
-// Core Resolution-First Target Representation Selector
+// Root-Level Manifest XML Pruning Engine
+// ============================================================================
+
+struct VideoRepInfo {
+    NSRange range;
+    uint32_t width;
+    uint32_t height;
+    uint64_t bandwidth;
+    NSString *repId;
+};
+
+static id PruneManifestXml(id contentsOfXml) {
+    if (!contentsOfXml) return nil;
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    if (mode == InstagramDash1440pModeDisabled) {
+        return contentsOfXml;
+    }
+
+    @try {
+        BOOL isData = [contentsOfXml isKindOfClass:[NSData class]];
+        BOOL isString = [contentsOfXml isKindOfClass:[NSString class]];
+        if (!isData && !isString) {
+            return contentsOfXml;
+        }
+
+        NSString *xmlStr = nil;
+        if (isData) {
+            xmlStr = [[NSString alloc] initWithData:(NSData *)contentsOfXml encoding:NSUTF8StringEncoding];
+        } else {
+            xmlStr = (NSString *)contentsOfXml;
+        }
+
+        if (!xmlStr || xmlStr.length == 0 || [xmlStr rangeOfString:@"<Representation"].location == NSNotFound) {
+            return contentsOfXml;
+        }
+
+        static NSRegularExpression *s_repRegex = nil;
+        static NSRegularExpression *s_widthRegex = nil;
+        static NSRegularExpression *s_heightRegex = nil;
+        static NSRegularExpression *s_bwRegex = nil;
+        static NSRegularExpression *s_idRegex = nil;
+        static dispatch_once_t s_regexOnce;
+        dispatch_once(&s_regexOnce, ^{
+            s_repRegex = [[NSRegularExpression alloc] initWithPattern:@"<Representation\\b[\\s\\S]*?(?:/>|</Representation>)"
+                                                              options:0
+                                                                error:nil];
+            s_widthRegex = [[NSRegularExpression alloc] initWithPattern:@"width=\"(\\d+)\"" options:0 error:nil];
+            s_heightRegex = [[NSRegularExpression alloc] initWithPattern:@"height=\"(\\d+)\"" options:0 error:nil];
+            s_bwRegex = [[NSRegularExpression alloc] initWithPattern:@"bandwidth=\"(\\d+)\"" options:0 error:nil];
+            s_idRegex = [[NSRegularExpression alloc] initWithPattern:@"id=\"([^\"]+)\"" options:0 error:nil];
+        });
+
+        NSArray<NSTextCheckingResult *> *matches = [s_repRegex matchesInString:xmlStr options:0 range:NSMakeRange(0, xmlStr.length)];
+        if (!matches || matches.count <= 1) {
+            return contentsOfXml;
+        }
+
+        std::vector<VideoRepInfo> videoReps;
+        BOOL isCellular = InstagramWifiSpoofer_IsCellularData();
+
+        for (NSTextCheckingResult *match in matches) {
+            NSRange repRange = match.range;
+            NSString *repBlock = [xmlStr substringWithRange:repRange];
+
+            // Filter out audio representations by AdaptationSet context
+            NSRange beforeRange = NSMakeRange(0, repRange.location);
+            NSRange lastAdaptationSet = [xmlStr rangeOfString:@"<AdaptationSet" options:NSBackwardsSearch range:beforeRange];
+            if (lastAdaptationSet.location != NSNotFound) {
+                NSRange adaptHeaderRange = NSMakeRange(lastAdaptationSet.location, MIN((NSUInteger)300, xmlStr.length - lastAdaptationSet.location));
+                NSString *adaptHeader = [xmlStr substringWithRange:adaptHeaderRange];
+                if ([adaptHeader rangeOfString:@"audio"].location != NSNotFound) {
+                    continue;
+                }
+            }
+
+            // Direct block audio check
+            if ([repBlock rangeOfString:@"mimeType=\"audio"].location != NSNotFound ||
+                [repBlock rangeOfString:@"audioSamplingRate"].location != NSNotFound ||
+                [repBlock rangeOfString:@"codecs=\"mp4a"].location != NSNotFound) {
+                continue;
+            }
+
+            uint32_t w = 0, h = 0;
+            uint64_t bw = 0;
+            NSString *repId = @"";
+
+            NSTextCheckingResult *wMatch = [s_widthRegex firstMatchInString:repBlock options:0 range:NSMakeRange(0, repBlock.length)];
+            if (wMatch && wMatch.numberOfRanges > 1) {
+                w = (uint32_t)[[repBlock substringWithRange:[wMatch rangeAtIndex:1]] intValue];
+            }
+
+            NSTextCheckingResult *hMatch = [s_heightRegex firstMatchInString:repBlock options:0 range:NSMakeRange(0, repBlock.length)];
+            if (hMatch && hMatch.numberOfRanges > 1) {
+                h = (uint32_t)[[repBlock substringWithRange:[hMatch rangeAtIndex:1]] intValue];
+            }
+
+            NSTextCheckingResult *bwMatch = [s_bwRegex firstMatchInString:repBlock options:0 range:NSMakeRange(0, repBlock.length)];
+            if (bwMatch && bwMatch.numberOfRanges > 1) {
+                bw = (uint64_t)[[repBlock substringWithRange:[bwMatch rangeAtIndex:1]] longLongValue];
+            }
+
+            NSTextCheckingResult *idMatch = [s_idRegex firstMatchInString:repBlock options:0 range:NSMakeRange(0, repBlock.length)];
+            if (idMatch && idMatch.numberOfRanges > 1) {
+                repId = [repBlock substringWithRange:[idMatch rangeAtIndex:1]];
+            }
+
+            if (w > 0 || h > 0 || [repBlock rangeOfString:@"video/"].location != NSNotFound) {
+                VideoRepInfo info;
+                info.range = repRange;
+                info.width = w;
+                info.height = h;
+                info.bandwidth = bw;
+                info.repId = repId;
+                videoReps.push_back(info);
+            }
+        }
+
+        if (videoReps.size() <= 1) {
+            return contentsOfXml;
+        }
+
+        int targetIdx = -1;
+        BOOL has1440 = NO;
+        BOOL has1080 = NO;
+
+        for (size_t i = 0; i < videoReps.size(); i++) {
+            uint32_t w = videoReps[i].width;
+            uint32_t h = videoReps[i].height;
+            uint64_t pixels = (uint64_t)w * h;
+            NSString *rid = videoReps[i].repId;
+            if (w >= 1200 || h >= 2200 || pixels >= 2800000ULL ||
+                (rid && ([rid containsString:@"1440"] || [rid containsString:@"2k"] || [rid containsString:@"1539525017490074"] || [rid containsString:@"968238693007748"]))) {
+                has1440 = YES;
+            }
+            if (w >= 960 || h >= 1700 || pixels >= 1600000ULL || (rid && [rid containsString:@"1080"])) {
+                has1080 = YES;
+            }
+        }
+
+        if (mode == InstagramDash1440pModeWifiOnly && isCellular) {
+            // Mode 1 on Cellular: Cap to 1080p
+            uint64_t bestMetric = 0;
+            for (size_t i = 0; i < videoReps.size(); i++) {
+                uint32_t w = videoReps[i].width;
+                uint32_t h = videoReps[i].height;
+                uint64_t pixels = (uint64_t)w * h;
+                NSString *rid = videoReps[i].repId;
+                BOOL is1440 = (w >= 1200 || h >= 2200 || pixels >= 2800000ULL || (rid && ([rid containsString:@"1440"] || [rid containsString:@"2k"])));
+                if (!is1440) {
+                    uint64_t metric = pixels * 10000000ULL + videoReps[i].bandwidth;
+                    if (targetIdx == -1 || metric > bestMetric) {
+                        bestMetric = metric;
+                        targetIdx = (int)i;
+                    }
+                }
+            }
+        } else {
+            // Mode 1 on Wi-Fi OR Mode 2 (Always 1440p): 1440p Priority, 1080p Fallback Floor
+            if (has1440) {
+                uint64_t bestBw = 0;
+                for (size_t i = 0; i < videoReps.size(); i++) {
+                    uint32_t w = videoReps[i].width;
+                    uint32_t h = videoReps[i].height;
+                    uint64_t pixels = (uint64_t)w * h;
+                    NSString *rid = videoReps[i].repId;
+                    BOOL is1440 = (w >= 1200 || h >= 2200 || pixels >= 2800000ULL || (rid && ([rid containsString:@"1440"] || [rid containsString:@"2k"])));
+                    if (is1440) {
+                        if (targetIdx == -1 || videoReps[i].bandwidth > bestBw) {
+                            bestBw = videoReps[i].bandwidth;
+                            targetIdx = (int)i;
+                        }
+                    }
+                }
+            } else if (has1080) {
+                uint64_t bestBw = 0;
+                for (size_t i = 0; i < videoReps.size(); i++) {
+                    uint32_t w = videoReps[i].width;
+                    uint32_t h = videoReps[i].height;
+                    uint64_t pixels = (uint64_t)w * h;
+                    NSString *rid = videoReps[i].repId;
+                    BOOL is1080 = (w >= 960 || h >= 1700 || pixels >= 1600000ULL || (rid && [rid containsString:@"1080"]));
+                    if (is1080) {
+                        if (targetIdx == -1 || videoReps[i].bandwidth > bestBw) {
+                            bestBw = videoReps[i].bandwidth;
+                            targetIdx = (int)i;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (targetIdx == -1) {
+            targetIdx = 0;
+        }
+
+        NSMutableString *prunedStr = [xmlStr mutableCopy];
+        for (int i = (int)videoReps.size() - 1; i >= 0; i--) {
+            if (i != targetIdx) {
+                NSRange r = videoReps[i].range;
+                while (r.location > 0 && ([prunedStr characterAtIndex:r.location - 1] == ' ' || [prunedStr characterAtIndex:r.location - 1] == '\t')) {
+                    r.location--;
+                    r.length++;
+                }
+                if (r.location > 0 && [prunedStr characterAtIndex:r.location - 1] == '\n') {
+                    r.location--;
+                    r.length++;
+                }
+                [prunedStr deleteCharactersInRange:r];
+            }
+        }
+
+        if (isData) {
+            return [prunedStr dataUsingEncoding:NSUTF8StringEncoding];
+        }
+        return [prunedStr copy];
+    } @catch (NSException *ex) {
+        return contentsOfXml;
+    }
+}
+
+// ============================================================================
+// Core Target Representation Selector (For Default Initial Chunk Selection)
 // ============================================================================
 
 static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) {
     if (!representations || ![representations isKindOfClass:[NSArray class]] || representations.count == 0) {
         return nil;
+    }
+
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    if (mode == InstagramDash1440pModeDisabled) {
+        return representations.firstObject;
     }
 
     id rep1440p = nil;
@@ -418,7 +660,6 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
     for (id rep in representations) {
         if (!rep || IsAudioRepresentation(rep)) continue;
 
-        // Cache metadata for reliable on-screen active telemetry resolution
         CacheRepresentationMetadata(rep);
 
         CGSize sz = GetRepresentationPixelDimensions(rep);
@@ -437,10 +678,6 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
                        (repId && [repId containsString:@"1080"]) ||
                        (encodingTag && [encodingTag containsString:@"1080"])));
 
-        DashLog(@"[Quality Selector] Candidate rep: %@ (%.0fx%.0f, %llu bps, is1440=%d, is1080=%d)",
-                repId, sz.width, sz.height, bw, is1440, is1080);
-
-        // 1. Evaluate 1440p pool (strictly prioritize resolution over bitrate inversion)
         if (is1440) {
             if (!rep1440p || bw > maxBw1440p) {
                 rep1440p = rep;
@@ -448,7 +685,6 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
             }
         }
 
-        // 2. Evaluate 1080p fallback floor
         if (is1080) {
             if (!rep1080p || bw > maxBw1080p) {
                 rep1080p = rep;
@@ -456,7 +692,6 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
             }
         }
 
-        // 3. Track highest resolution under 1440p (cellular max-cap ceiling)
         if (!is1440) {
             if (pixels > maxPixelsUnder1440) {
                 maxPixelsUnder1440 = pixels;
@@ -468,7 +703,6 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
             }
         }
 
-        // 4. Evaluate general max pool for non-HD edge cases
         if (pixels > maxPixelsGeneral) {
             maxPixelsGeneral = pixels;
             maxBwGeneral = bw;
@@ -481,33 +715,22 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
 
     BOOL isCellular = InstagramWifiSpoofer_IsCellularData();
     id chosen = nil;
-    if (isCellular) {
-        // ONLY ON CELLULAR DATA: Make 1080p preferred and max (1440p is bigger to handle)
+    if (mode == InstagramDash1440pModeWifiOnly && isCellular) {
         chosen = rep1080p ?: repHighestUnder1440 ?: rep1440p ?: representations.firstObject;
-        DashLog(@"[Quality Selector] Cellular data active: 1080p Preferred & Max selected: %@", chosen);
     } else {
-        // Wi-Fi connection active: 1440p Priority, 1080p Fallback Floor
         chosen = rep1440p ?: rep1080p ?: repHighest ?: representations.firstObject;
-        DashLog(@"[Quality Selector] Wi-Fi connection active: 1440p Priority selected: %@", chosen);
     }
     return chosen;
 }
 
 // ============================================================================
-// Objective-C Swizzle Helpers & Method Introspection
+// Objective-C Swizzle Helpers
 // ============================================================================
-
-static void LogClassMethods(Class cls) {
-    (void)cls;
-}
 
 static BOOL SafeSwizzleMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
     if (!cls || !sel || !newImp) return NO;
     Method m = class_getInstanceMethod(cls, sel);
-    if (!m) {
-        DashLog(@"[Swizzle FAILED] -[%s %s] does not exist!", class_getName(cls), sel_getName(sel));
-        return NO;
-    }
+    if (!m) return NO;
 
     IMP orig = method_getImplementation(m);
     if (orig == newImp) return YES;
@@ -520,108 +743,100 @@ static BOOL SafeSwizzleMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
     if (!class_addMethod(cls, sel, newImp, types)) {
         method_setImplementation(m, newImp);
     }
-    DashLog(@"[Swizzle OK] Successfully swizzled -[%s %s]", class_getName(cls), sel_getName(sel));
+    return YES;
+}
+
+static BOOL SafeSwizzleClassMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
+    if (!cls || !sel || !newImp) return NO;
+    Class metaCls = object_getClass((id)cls);
+    Method m = class_getClassMethod(cls, sel);
+    if (!m) return NO;
+
+    IMP orig = method_getImplementation(m);
+    if (orig == newImp) return YES;
+
+    if (origImp && !*origImp) {
+        *origImp = orig;
+    }
+
+    const char *types = method_getTypeEncoding(m);
+    if (!class_addMethod(metaCls, sel, newImp, types)) {
+        method_setImplementation(m, newImp);
+    }
     return YES;
 }
 
 // ============================================================================
-// Quality Selector General Handler (Dispatches for any FNF Quality Selector)
+// Root Manifest Ingestion Swizzles
 // ============================================================================
 
-static id HandleQualitySelection(id self, SEL _cmd, IMP origImp, const char *className) {
-    id chosen = nil;
-    if (origImp) {
-        chosen = ((id (*)(id, SEL))origImp)(self, _cmd);
+// FNFMediaPresentationDescription Factory Hooks
+static id (*orig_presDesc_xml_config)(id self, SEL _cmd, id contentsOfXml, id mpdUrl, id config, id mpdConfig, id source, NSError **error) = NULL;
+static id Hook_PresDesc_WithContentsOfXml_Config(id self, SEL _cmd, id contentsOfXml, id mpdUrl, id config, id mpdConfig, id source, NSError **error) {
+    id pruned = PruneManifestXml(contentsOfXml);
+    if (orig_presDesc_xml_config) {
+        return orig_presDesc_xml_config(self, _cmd, pruned ? pruned : contentsOfXml, mpdUrl, config, mpdConfig, source, error);
     }
+    return nil;
+}
 
-    DashLog(@"[%s] selectQuality invoked, standard result: %@", className, chosen);
-
-    if (!InstagramDash1440p_IsEnabled()) {
-        if (chosen) CacheRepresentationMetadata(chosen);
-        return chosen;
+static id (*orig_presDesc_xml_error)(id self, SEL _cmd, id contentsOfXml, id mpdUrl, NSError **error) = NULL;
+static id Hook_PresDesc_WithContentsOfXml_Error(id self, SEL _cmd, id contentsOfXml, id mpdUrl, NSError **error) {
+    id pruned = PruneManifestXml(contentsOfXml);
+    if (orig_presDesc_xml_error) {
+        return orig_presDesc_xml_error(self, _cmd, pruned ? pruned : contentsOfXml, mpdUrl, error);
     }
+    return nil;
+}
 
-    // Attempt to locate candidate representations from selector instance
-    NSArray *reps = nil;
-    if ([self respondsToSelector:@selector(representations)]) {
-        @try {
-            reps = [self valueForKey:@"representations"];
-        } @catch (NSException *e) {}
+static id (*orig_presDesc_xml_curTime)(id self, SEL _cmd, id contentsOfXml, id mpdUrl, id config, id mpdConfig, id source, id currentTime, NSError **error) = NULL;
+static id Hook_PresDesc_WithContentsOfXml_CurTime(id self, SEL _cmd, id contentsOfXml, id mpdUrl, id config, id mpdConfig, id source, id currentTime, NSError **error) {
+    id pruned = PruneManifestXml(contentsOfXml);
+    if (orig_presDesc_xml_curTime) {
+        return orig_presDesc_xml_curTime(self, _cmd, pruned ? pruned : contentsOfXml, mpdUrl, config, mpdConfig, source, currentTime, error);
     }
-    if (!reps && [self respondsToSelector:@selector(playlist)]) {
-        @try {
-            id playlist = [self valueForKey:@"playlist"];
-            if (playlist && [playlist respondsToSelector:@selector(representationsForTrack:)]) {
-                reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 0);
+    return nil;
+}
+
+// IGVideo Inlined Manifest Accessor Hooks
+static NSData * (*orig_video_dashManifest)(id self, SEL _cmd) = NULL;
+static NSData * Hook_IGVideo_DashManifest(id self, SEL _cmd) {
+    NSData *orig = orig_video_dashManifest ? orig_video_dashManifest(self, _cmd) : nil;
+    if (!orig) return nil;
+    return (NSData *)PruneManifestXml(orig);
+}
+
+static NSData * (*orig_video_dashManifestData)(id self, SEL _cmd) = NULL;
+static NSData * Hook_IGVideo_DashManifestData(id self, SEL _cmd) {
+    NSData *orig = orig_video_dashManifestData ? orig_video_dashManifestData(self, _cmd) : nil;
+    if (!orig) return nil;
+    return (NSData *)PruneManifestXml(orig);
+}
+
+// FNFDashPlaylist defaultRepresentationForTrack:
+static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
+static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
+    if (track == 0 && InstagramDash1440p_IsEnabled()) {
+        NSArray *reps = nil;
+        if ([self respondsToSelector:@selector(representationsForTrack:)]) {
+            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), 0);
+        }
+        if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
+            id chosen = SelectTargetRepresentation(reps, YES);
+            if (chosen) {
+                return chosen;
             }
-        } @catch (NSException *e) {}
-    }
-    if (!reps) {
-        Ivar ivar = class_getInstanceVariable([self class], "_playlist");
-        if (!ivar) ivar = class_getInstanceVariable([self class], "playlist");
-        if (ivar) {
-            id playlist = object_getIvar(self, ivar);
-            if (playlist && [playlist respondsToSelector:@selector(representationsForTrack:)]) {
-                reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 0);
-            }
         }
     }
-    if (!reps) {
-        Ivar ivar = class_getInstanceVariable([self class], "_representations");
-        if (!ivar) ivar = class_getInstanceVariable([self class], "representations");
-        if (ivar) {
-            reps = (NSArray *)object_getIvar(self, ivar);
-        }
+    if (orig_playlist_defaultRepresentationForTrack) {
+        return orig_playlist_defaultRepresentationForTrack(self, _cmd, track);
     }
-
-    if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
-        BOOL isPrefetch = (strstr(className, "Prefetch") != NULL);
-        id targetRep = SelectTargetRepresentation(reps, isPrefetch);
-        if (targetRep) {
-            DashLog(@"[%s] Forcing target quality representation: %@", className, targetRep);
-            return targetRep;
-        }
-    } else {
-        DashLog(@"[%s] Could not extract candidate representations array; tracking standard result: %@", className, chosen);
-        if (chosen) {
-            CacheRepresentationMetadata(chosen);
-        }
-    }
-
-    return chosen;
+    return nil;
 }
 
-// Dedicated function pointers and hooks for each quality selector class
-static id (*orig_ABRQualitySelector_selectQuality)(id self, SEL _cmd) = NULL;
-static id Hook_ABRQualitySelector_SelectQuality(id self, SEL _cmd) {
-    return HandleQualitySelection(self, _cmd, (IMP)orig_ABRQualitySelector_selectQuality, "FNFDashABRQualitySelector");
-}
-
-static id (*orig_DefaultQualitySelector_selectQuality)(id self, SEL _cmd) = NULL;
-static id Hook_DefaultQualitySelector_SelectQuality(id self, SEL _cmd) {
-    return HandleQualitySelection(self, _cmd, (IMP)orig_DefaultQualitySelector_selectQuality, "FNFDashDefaultQualitySelector");
-}
-
-static id (*orig_QualitySelector_selectQuality)(id self, SEL _cmd) = NULL;
-static id Hook_QualitySelector_SelectQuality(id self, SEL _cmd) {
-    return HandleQualitySelection(self, _cmd, (IMP)orig_QualitySelector_selectQuality, "FNFDashQualitySelector");
-}
-
-static id (*orig_PrefetchQualitySelector_selectQuality)(id self, SEL _cmd) = NULL;
-static id Hook_PrefetchQualitySelector_SelectQuality(id self, SEL _cmd) {
-    return HandleQualitySelection(self, _cmd, (IMP)orig_PrefetchQualitySelector_selectQuality, "FNFDashPrefetchQualitySelector");
-}
-
-static id (*orig_LiveQualitySelector_selectQuality)(id self, SEL _cmd) = NULL;
-static id Hook_LiveQualitySelector_SelectQuality(id self, SEL _cmd) {
-    return HandleQualitySelection(self, _cmd, (IMP)orig_LiveQualitySelector_selectQuality, "FNFDashLiveQualitySelector");
-}
-
-// Hook for FNFDashABRQualitySelector _selectQualityFromRepresentations:sequenceIndices:withAvailableBandwidth:
+// FNFDashABRQualitySelector: Fallback guard if manifest was loaded before hook
 static id (*orig_ABR_selectQualitySeqIndices)(id self, SEL _cmd, NSArray *representations, std::vector<int> seqIndices, double bandwidth) = NULL;
-
 static id Hook_ABR_SelectQualitySeqIndices(id self, SEL _cmd, NSArray *representations, std::vector<int> seqIndices, double bandwidth) {
-    DashLog(@"[FNFDashABRQualitySelector] _selectQualityFromRepresentations:sequenceIndices:... called with %lu reps", (unsigned long)representations.count);
     if (InstagramDash1440p_IsEnabled() && representations && [representations isKindOfClass:[NSArray class]] && representations.count > 0) {
         id chosen = SelectTargetRepresentation(representations, NO);
         if (chosen) {
@@ -634,79 +849,8 @@ static id Hook_ABR_SelectQualitySeqIndices(id self, SEL _cmd, NSArray *represent
     return representations.firstObject;
 }
 
-// Hook for FNFDashPlayerSizePruner
-static NSArray * (*orig_sizePruner_pruneQualities)(id self, SEL _cmd, NSArray *qualities) = NULL;
-
-static NSArray * Hook_PruneQualitiesNoOp(id self, SEL _cmd, NSArray *qualities) {
-    DashLog(@"[FNFDashPlayerSizePruner] pruneQualities: called with %lu qualities", (unsigned long)qualities.count);
-    if (!InstagramDash1440p_IsEnabled() && orig_sizePruner_pruneQualities) {
-        return orig_sizePruner_pruneQualities(self, _cmd, qualities);
-    }
-    return qualities;
-}
-
-// Hook for FNFDashPlaylist representationsForTrack:
-static NSArray * (*orig_playlist_representationsForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
-
-static NSArray * Hook_Playlist_RepresentationsForTrack(id self, SEL _cmd, NSInteger track) {
-    NSArray *origReps = nil;
-    if (orig_playlist_representationsForTrack) {
-        origReps = orig_playlist_representationsForTrack(self, _cmd, track);
-    }
-    if (track != 0 || !InstagramDash1440p_IsEnabled() || !origReps || ![origReps isKindOfClass:[NSArray class]] || origReps.count <= 1) {
-        return origReps;
-    }
-
-    id chosen = SelectTargetRepresentation(origReps, NO);
-    if (chosen) {
-        DashLog(@"[FNFDashPlaylist] representationsForTrack:0 filtered to target quality: %@", chosen);
-        return @[ chosen ];
-    }
-    return origReps;
-}
-
-// Hook for FNFDashPlaylist _representationsForVideoTrack
-static NSArray * (*orig_playlist_representationsForVideoTrack)(id self, SEL _cmd) = NULL;
-
-static NSArray * Hook_Playlist_RepresentationsForVideoTrack(id self, SEL _cmd) {
-    NSArray *origReps = nil;
-    if (orig_playlist_representationsForVideoTrack) {
-        origReps = orig_playlist_representationsForVideoTrack(self, _cmd);
-    }
-    if (!InstagramDash1440p_IsEnabled() || !origReps || ![origReps isKindOfClass:[NSArray class]] || origReps.count <= 1) {
-        return origReps;
-    }
-
-    id chosen = SelectTargetRepresentation(origReps, YES);
-    if (chosen) {
-        DashLog(@"[FNFDashPlaylist] _representationsForVideoTrack filtered to target quality: %@", chosen);
-        return @[ chosen ];
-    }
-    return origReps;
-}
-
-// Hook for FNFDashPlaylist defaultRepresentationForTrack:
-static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
-
-static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
-    DashLog(@"[FNFDashPlaylist] defaultRepresentationForTrack:%ld invoked", (long)track);
-    if (track == 0 && InstagramDash1440p_IsEnabled()) {
-        NSArray *reps = nil;
-        if ([self respondsToSelector:@selector(representationsForTrack:)]) {
-            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), 0);
-        }
-        if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
-            id chosen = SelectTargetRepresentation(reps, YES);
-            if (chosen) {
-                DashLog(@"[FNFDashPlaylist] defaultRepresentationForTrack:0 (Video) forced: %@", chosen);
-                return chosen;
-            }
-        }
-    }
-    if (orig_playlist_defaultRepresentationForTrack) {
-        return orig_playlist_defaultRepresentationForTrack(self, _cmd, track);
-    }
-    return nil;
+static BOOL Hook_ReturnNO(id self, SEL _cmd, id rep, BOOL isIntentional) {
+    return NO;
 }
 
 // ============================================================================
@@ -739,7 +883,6 @@ static OSStatus Hook_VTDecompressionSessionCreate(
     }
 
     if (decoderSpec) {
-        // Enforce Apple Silicon hardware video decoder specification for high-bitrate VP9 streams
         CFDictionarySetValue(decoderSpec, CFSTR("EnableHardwareAcceleratedVideoDecoder"), kCFBooleanTrue);
     }
 
@@ -767,7 +910,6 @@ static OSStatus Hook_VTDecompressionSessionCreate(
         });
 
         if (s_setPropFunc) {
-            // Guarantee real-time presentation deadlines to prevent frame dropping during 1440p DASH streaming
             s_setPropFunc(*decompressionSessionOut, CFSTR("RealTime"), kCFBooleanTrue);
         }
     }
@@ -789,30 +931,19 @@ static void HookVTDecompressionSessionCreateOnce(void) {
     });
 }
 
-// ----------------------------------------------------------------------------
-// FNF VP9 Session Decompression Hook
-// ----------------------------------------------------------------------------
-
+// FNFDecompressionSessionForVP9X
 static id (*orig_vp9x_init)(id self, SEL _cmd, id delegate, void *formatDesc, CGSize videoSize, BOOL async, void *config, id pcm, NSError **error) = NULL;
 
 static id Hook_FNFDecompressionSessionForVP9X_Init(id self, SEL _cmd, id delegate, void *formatDesc, CGSize videoSize, BOOL async, void *config, id pcm, NSError **error) {
     if (config) {
         uint8_t *cfg = (uint8_t *)config;
-        // Verified FNFDecompressionConfig byte offsets from FBSharedFramework disassembly:
-        // [0x59] enableVTForVP9: 1 -> Selects native VideoToolbox hardware decode path
-        // [0x58] enableVTHWAcceleratedDetection: 1 -> Enables hardware engine probing
-        // [0x74] fixVP9DecoderRegistrationRace: 1 -> Prevents concurrent decoder init race
-        // [0x38] enableVP9VTDecodingDimensionCheck: 0 -> Bypass resolution cap for 1440p
-        // [0x33] disableVTAsynchronousDecompression: 0 -> Keep async hardware decompression enabled
-        // [0x34] disableVT1xRealTimePlayback: 0 -> Keep real-time 60fps presentation
-        // [0x35] disableVTTemporalProcessing: 0
-        cfg[0x59] = 1;
-        cfg[0x58] = 1;
-        cfg[0x74] = 1;
-        cfg[0x38] = 0;
-        cfg[0x33] = 0;
-        cfg[0x34] = 0;
-        cfg[0x35] = 0;
+        cfg[0x59] = 1; // enableVTForVP9
+        cfg[0x58] = 1; // enableVTHWAcceleratedDetection
+        cfg[0x74] = 1; // fixVP9DecoderRegistrationRace
+        cfg[0x38] = 0; // enableVP9VTDecodingDimensionCheck
+        cfg[0x33] = 0; // disableVTAsynchronousDecompression
+        cfg[0x34] = 0; // disableVT1xRealTimePlayback
+        cfg[0x35] = 0; // disableVTTemporalProcessing
     }
 
     if (orig_vp9x_init) {
@@ -822,45 +953,8 @@ static id Hook_FNFDecompressionSessionForVP9X_Init(id self, SEL _cmd, id delegat
 }
 
 static BOOL (*orig_vp9x_usesSoftwareDecoder)(id self, SEL _cmd) = NULL;
-
 static BOOL Hook_FNFDecompressionSessionForVP9X_UsesSoftwareDecoder(id self, SEL _cmd) {
-    // Hardware accelerated via VideoToolbox
     return NO;
-}
-
-static BOOL Hook_ReturnNO(id self, SEL _cmd, id rep, BOOL isIntentional) {
-    return NO;
-}
-
-// Hooks for IGFNFSelectedQualityProvider
-static void (*orig_qualityProvider_videoQualitySelected)(id self, SEL _cmd, id rep, id meta, NSInteger track) = NULL;
-
-static void Hook_QualityProvider_VideoQualitySelected(id self, SEL _cmd, id rep, id meta, NSInteger track) {
-    DashLog(@"[IGFNFSelectedQualityProvider] videoQualitySelected: track=%ld rep=%@", (long)track, rep);
-    if (track == 0 && rep) {
-        id actualRep = ExtractRepresentationFromObject(rep);
-        if (actualRep && !IsAudioRepresentation(actualRep)) {
-            CacheRepresentationMetadata(actualRep);
-        }
-    }
-    if (orig_qualityProvider_videoQualitySelected) {
-        orig_qualityProvider_videoQualitySelected(self, _cmd, rep, meta, track);
-    }
-}
-
-static void (*orig_qualityProvider_setVideoRep)(id self, SEL _cmd, id rep) = NULL;
-
-static void Hook_QualityProvider_SetVideoRep(id self, SEL _cmd, id rep) {
-    DashLog(@"[IGFNFSelectedQualityProvider] setVideoSelectedQualityRepresentation: %@", rep);
-    if (rep) {
-        id actualRep = ExtractRepresentationFromObject(rep);
-        if (actualRep && !IsAudioRepresentation(actualRep)) {
-            CacheRepresentationMetadata(actualRep);
-        }
-    }
-    if (orig_qualityProvider_setVideoRep) {
-        orig_qualityProvider_setVideoRep(self, _cmd, rep);
-    }
 }
 
 // ============================================================================
@@ -898,56 +992,39 @@ static void Hook_FNFVideoPlayer_PlayWithReason(id self, SEL _cmd, NSInteger reas
 // ============================================================================
 
 static void SwizzleDashClasses(void) {
-    DashLog(@"Registering 1440p VP9 DASH hooks and analyzing runtime classes...");
+    // 1. Root Manifest Parser Hooks on FNFMediaPresentationDescription
+    Class presDescCls = objc_getClass("FNFMediaPresentationDescription");
+    if (presDescCls) {
+        SEL sel1 = sel_registerName("presentationDescriptionWithContentsOfXml:mpdUrl:config:mpdConfig:source:error:");
+        SafeSwizzleClassMethod(presDescCls, sel1, (IMP)Hook_PresDesc_WithContentsOfXml_Config, (IMP *)&orig_presDesc_xml_config);
+        SafeSwizzleMethod(presDescCls, sel1, (IMP)Hook_PresDesc_WithContentsOfXml_Config, (IMP *)&orig_presDesc_xml_config);
 
-    // 1. FNFDashPlayerSizePruner
-    Class sizePrunerCls = objc_getClass("FNFDashPlayerSizePruner");
-    if (sizePrunerCls) {
-        LogClassMethods(sizePrunerCls);
-        SafeSwizzleMethod(sizePrunerCls, sel_registerName("pruneQualities:"),
-                          (IMP)Hook_PruneQualitiesNoOp, (IMP *)&orig_sizePruner_pruneQualities);
-    } else {
-        DashLog(@"[Warning] FNFDashPlayerSizePruner class not found");
+        SEL sel2 = sel_registerName("presentationDescriptionWithContentsOfXml:mpdUrl:error:");
+        SafeSwizzleClassMethod(presDescCls, sel2, (IMP)Hook_PresDesc_WithContentsOfXml_Error, (IMP *)&orig_presDesc_xml_error);
+        SafeSwizzleMethod(presDescCls, sel2, (IMP)Hook_PresDesc_WithContentsOfXml_Error, (IMP *)&orig_presDesc_xml_error);
+
+        SEL sel3 = sel_registerName("_presentationDescriptionWithContentsOfXml:mpdUrl:config:mpdConfig:source:currentTime:error:");
+        SafeSwizzleClassMethod(presDescCls, sel3, (IMP)Hook_PresDesc_WithContentsOfXml_CurTime, (IMP *)&orig_presDesc_xml_curTime);
+        SafeSwizzleMethod(presDescCls, sel3, (IMP)Hook_PresDesc_WithContentsOfXml_CurTime, (IMP *)&orig_presDesc_xml_curTime);
     }
 
-    // 2. FNFDashPlaylist
+    // 2. Inlined Manifest Accessors on IGVideo
+    Class videoCls = objc_getClass("IGVideo");
+    if (videoCls) {
+        SafeSwizzleMethod(videoCls, sel_registerName("dashManifest"),
+                          (IMP)Hook_IGVideo_DashManifest, (IMP *)&orig_video_dashManifest);
+        SafeSwizzleMethod(videoCls, sel_registerName("dashManifestData"),
+                          (IMP)Hook_IGVideo_DashManifestData, (IMP *)&orig_video_dashManifestData);
+    }
+
+    // 3. FNFDashPlaylist default representation for initial chunk
     Class playlistCls = objc_getClass("FNFDashPlaylist");
     if (playlistCls) {
-        LogClassMethods(playlistCls);
-        SafeSwizzleMethod(playlistCls, sel_registerName("representationsForTrack:"),
-                          (IMP)Hook_Playlist_RepresentationsForTrack, (IMP *)&orig_playlist_representationsForTrack);
-        SafeSwizzleMethod(playlistCls, sel_registerName("_representationsForVideoTrack"),
-                          (IMP)Hook_Playlist_RepresentationsForVideoTrack, (IMP *)&orig_playlist_representationsForVideoTrack);
         SafeSwizzleMethod(playlistCls, sel_registerName("defaultRepresentationForTrack:"),
                           (IMP)Hook_Playlist_DefaultRepresentationForTrack, (IMP *)&orig_playlist_defaultRepresentationForTrack);
-    } else {
-        DashLog(@"[Warning] FNFDashPlaylist class not found");
     }
 
-    // 3. Multi-Class Quality Selectors: Hook selectQuality on all known selector variants
-    struct QualitySelectorBinding {
-        const char *name;
-        IMP hook;
-        IMP *orig;
-    } selectors[] = {
-        {"FNFDashABRQualitySelector", (IMP)Hook_ABRQualitySelector_SelectQuality, (IMP *)&orig_ABRQualitySelector_selectQuality},
-        {"FNFDashDefaultQualitySelector", (IMP)Hook_DefaultQualitySelector_SelectQuality, (IMP *)&orig_DefaultQualitySelector_selectQuality},
-        {"FNFDashQualitySelector", (IMP)Hook_QualitySelector_SelectQuality, (IMP *)&orig_QualitySelector_selectQuality},
-        {"FNFDashPrefetchQualitySelector", (IMP)Hook_PrefetchQualitySelector_SelectQuality, (IMP *)&orig_PrefetchQualitySelector_selectQuality},
-        {"FNFDashLiveQualitySelector", (IMP)Hook_LiveQualitySelector_SelectQuality, (IMP *)&orig_LiveQualitySelector_selectQuality}
-    };
-
-    for (size_t i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
-        Class qCls = objc_getClass(selectors[i].name);
-        if (qCls) {
-            LogClassMethods(qCls);
-            SafeSwizzleMethod(qCls, sel_registerName("selectQuality"), selectors[i].hook, selectors[i].orig);
-        } else {
-            DashLog(@"[Notice] %s class not loaded in runtime", selectors[i].name);
-        }
-    }
-
-    // 3b. FNFDashABRQualitySelector Sequence Indices variant
+    // 4. FNFDashABRQualitySelector fallback guard
     Class abrCls = objc_getClass("FNFDashABRQualitySelector");
     if (abrCls) {
         SafeSwizzleMethod(abrCls, sel_registerName("_selectQualityFromRepresentations:sequenceIndices:withAvailableBandwidth:"),
@@ -956,7 +1033,7 @@ static void SwizzleDashClasses(void) {
                           (IMP)Hook_ReturnNO, NULL);
     }
 
-    // 4. Force Apple VideoToolbox Hardware VP9 Decoder
+    // 5. Apple VideoToolbox Hardware VP9 Decoder
     Class vp9xCls = objc_getClass("FNFDecompressionSessionForVP9X");
     if (vp9xCls) {
         SafeSwizzleMethod(vp9xCls,
@@ -969,17 +1046,7 @@ static void SwizzleDashClasses(void) {
                           (IMP *)&orig_vp9x_usesSoftwareDecoder);
     }
 
-    // 5. Active Telemetry Observers
-    Class qualityProviderCls = objc_getClass("IGFNFSelectedQualityProvider");
-    if (qualityProviderCls) {
-        LogClassMethods(qualityProviderCls);
-        SafeSwizzleMethod(qualityProviderCls, sel_registerName("videoQualitySelected:playerMetadata:trackType:"),
-                          (IMP)Hook_QualityProvider_VideoQualitySelected, (IMP *)&orig_qualityProvider_videoQualitySelected);
-        SafeSwizzleMethod(qualityProviderCls, sel_registerName("setVideoSelectedQualityRepresentation:"),
-                          (IMP)Hook_QualityProvider_SetVideoRep, (IMP *)&orig_qualityProvider_setVideoRep);
-    }
-
-    // 6. Active On-Screen Reel Video Player (Strictly active playback only, no offscreen/prefetch)
+    // 6. Active On-Screen Reel Video Player Telemetry
     Class videoPlayerCls = objc_getClass("IGFNFVideoPlayer");
     if (videoPlayerCls) {
         SafeSwizzleMethod(videoPlayerCls, sel_registerName("_stateManagerTransitionToVideoStartedPlaying"),
@@ -992,8 +1059,6 @@ static void SwizzleDashClasses(void) {
                           (IMP)Hook_FNFVideoPlayer_PlayWithReason,
                           (IMP *)&orig_FNFVideoPlayer_playWithReason);
     }
-
-    DashLog(@"1440p VP9 DASH hook registration pass finished");
 }
 
 static void ApplyAllDash1440pSwizzles(void) {
@@ -1006,12 +1071,6 @@ static void ApplyAllDash1440pSwizzles(void) {
 void InstagramDash1440p_Init(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        DashLog(@"==================================================================");
-        DashLog(@"Initializing Ultra-HD 1440p VP9 DASH Video Engine for Instagram");
-        DashLog(@"Active Reels & Feed Prefetchers: 1440p Priority, 1080p Fallback Floor");
-        DashLog(@"Apple VideoToolbox VP9 Hardware/Hybrid Decoder Enabled");
-        DashLog(@"==================================================================");
-
         HookVTDecompressionSessionCreateOnce();
         ApplyAllDash1440pSwizzles();
 
@@ -1019,7 +1078,6 @@ void InstagramDash1440p_Init(void) {
                                                            object:nil
                                                             queue:[NSOperationQueue mainQueue]
                                                        usingBlock:^(NSNotification * _Nonnull note) {
-            DashLog(@"UIApplicationDidFinishLaunchingNotification received, refreshing swizzles");
             ApplyAllDash1440pSwizzles();
         }];
 

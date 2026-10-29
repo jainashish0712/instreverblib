@@ -1049,7 +1049,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 }
 
 - (void)handleTap:(UITapGestureRecognizer *)gesture {
-    InstagramDash1440p_ToggleEnabled();
+    InstagramDash1440p_CycleMode();
     UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [feedback impactOccurred];
     [self updateAppearance];
@@ -1078,44 +1078,45 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 }
 
 - (void)updateAppearance {
-    BOOL isEnabled = InstagramDash1440p_IsEnabled();
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
     NSString *quality = InstagramDash1440p_GetCurrentQuality() ?: @"1440p";
     NSString *repId = InstagramDash1440p_GetCurrentRepresentationId() ?: @"ready";
     BOOL is1440 = InstagramDash1440p_IsActual1440p();
 
     NSString *text = nil;
-    if (!isEnabled) {
-        text = [NSString stringWithFormat:@"OFF (%@)", quality];
-    } else {
-        text = [NSString stringWithFormat:@"%@: %@", quality, repId];
+    if (mode == InstagramDash1440pModeDisabled) {
+        text = [NSString stringWithFormat:@"OFF (IG Default): %@", repId];
+        self.layer.borderColor = [UIColor colorWithWhite:0.6f alpha:0.45f].CGColor;
+        self.statusDot.backgroundColor = [UIColor colorWithWhite:0.6f alpha:0.8f];
+        self.titleLabel.textColor = [UIColor colorWithWhite:0.75f alpha:1.0f];
+    } else if (mode == InstagramDash1440pModeWifiOnly) {
+        BOOL isCell = InstagramWifiSpoofer_IsCellularData();
+        if (isCell) {
+            text = [NSString stringWithFormat:@"WiFi-1440p [Cell 1080p]: %@", repId];
+            self.layer.borderColor = [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:0.85f].CGColor;
+            self.statusDot.backgroundColor = [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:1.0f];
+        } else {
+            text = [NSString stringWithFormat:@"WiFi-1440p [%@]: %@", quality, repId];
+            self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.90f].CGColor;
+            self.statusDot.backgroundColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
+        }
+        self.titleLabel.textColor = [UIColor whiteColor];
+    } else { // InstagramDash1440pModeAlways1440p
+        text = [NSString stringWithFormat:@"All-1440p [%@]: %@", quality, repId];
+        self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.95f].CGColor;
+        self.statusDot.backgroundColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
+        self.titleLabel.textColor = [UIColor whiteColor];
     }
     self.titleLabel.text = text;
 
-    CGSize fit = [self.titleLabel sizeThatFits:CGSizeMake(340.0f, 20.0f)];
-    CGFloat targetWidth = MAX(120.0f, MIN(340.0f, fit.width + 26.0f));
+    CGSize fit = [self.titleLabel sizeThatFits:CGSizeMake(360.0f, 20.0f)];
+    CGFloat targetWidth = MAX(130.0f, MIN(360.0f, fit.width + 26.0f));
 
     CGRect f = self.frame;
     f.size.width = targetWidth;
     f.size.height = 20.0f;
     self.frame = f;
     self.titleLabel.frame = CGRectMake(17.0f, 0.0f, targetWidth - 23.0f, 20.0f);
-
-    if (isEnabled) {
-        if (is1440) {
-            // Vibrant Cyan for active 1440p playback
-            self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.90f].CGColor;
-            self.statusDot.backgroundColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
-        } else {
-            // Emerald Green for 1080p fallback / ready state
-            self.layer.borderColor = [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:0.85f].CGColor;
-            self.statusDot.backgroundColor = [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:1.0f];
-        }
-        self.titleLabel.textColor = [UIColor whiteColor];
-    } else {
-        self.layer.borderColor = [UIColor colorWithWhite:0.6f alpha:0.45f].CGColor;
-        self.statusDot.backgroundColor = [UIColor colorWithWhite:0.6f alpha:0.8f];
-        self.titleLabel.textColor = [UIColor colorWithWhite:0.75f alpha:1.0f];
-    }
 }
 
 @end
@@ -1358,6 +1359,15 @@ static NSString *FormatDataRate(double bytesPerSec) {
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:pan];
 
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(stopPolling)
+                                                     name:UIApplicationDidEnterBackgroundNotification
+                                                   object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(startPolling)
+                                                     name:UIApplicationWillEnterForegroundNotification
+                                                   object:nil];
+
         [self startPolling];
     }
     return self;
@@ -1381,6 +1391,7 @@ static NSString *FormatDataRate(double bytesPerSec) {
 }
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [self stopPolling];
 }
 
