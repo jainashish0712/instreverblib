@@ -622,9 +622,10 @@ static id PruneManifestXml(id contentsOfXml) {
         }
 
         if (isData) {
-            return [prunedStr dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *d = [prunedStr dataUsingEncoding:NSUTF8StringEncoding];
+            return d ? d : contentsOfXml;
         }
-        return [prunedStr copy];
+        return prunedStr ? [prunedStr copy] : contentsOfXml;
     } @catch (NSException *ex) {
         return contentsOfXml;
     }
@@ -677,47 +678,52 @@ static BOOL SafeSwizzleClassMethod(Class cls, SEL sel, IMP newImp, IMP *origImp)
 // Root Manifest Ingestion Swizzles
 // ============================================================================
 
-// FNFMediaPresentationDescription Factory Hooks
-static id (*orig_presDesc_xml_config)(id self, SEL _cmd, id contentsOfXml, id mpdUrl, id config, id mpdConfig, id source, NSError **error) = NULL;
-static id Hook_PresDesc_WithContentsOfXml_Config(id self, SEL _cmd, id contentsOfXml, id mpdUrl, id config, id mpdConfig, id source, NSError **error) {
-    id pruned = PruneManifestXml(contentsOfXml);
-    if (orig_presDesc_xml_config) {
-        return orig_presDesc_xml_config(self, _cmd, pruned ? pruned : contentsOfXml, mpdUrl, config, mpdConfig, source, error);
-    }
-    return nil;
-}
-
+// FNFMediaPresentationDescription Factory Hook
+// Selector: +[FNFMediaPresentationDescription presentationDescriptionWithContentsOfXml:mpdUrl:error:]
+// Signature: @40@0:8@16@24^@32 (Standard Objective-C object pointers)
 static id (*orig_presDesc_xml_error)(id self, SEL _cmd, id contentsOfXml, id mpdUrl, NSError **error) = NULL;
+static __thread BOOL s_inPresDescHook = NO;
 static id Hook_PresDesc_WithContentsOfXml_Error(id self, SEL _cmd, id contentsOfXml, id mpdUrl, NSError **error) {
-    id pruned = PruneManifestXml(contentsOfXml);
+    if (s_inPresDescHook) {
+        return orig_presDesc_xml_error ? orig_presDesc_xml_error(self, _cmd, contentsOfXml, mpdUrl, error) : nil;
+    }
+    s_inPresDescHook = YES;
+    id pruned = contentsOfXml ? PruneManifestXml(contentsOfXml) : nil;
+    id result = nil;
     if (orig_presDesc_xml_error) {
-        return orig_presDesc_xml_error(self, _cmd, pruned ? pruned : contentsOfXml, mpdUrl, error);
+        result = orig_presDesc_xml_error(self, _cmd, pruned ? pruned : contentsOfXml, mpdUrl, error);
     }
-    return nil;
-}
-
-static id (*orig_presDesc_xml_curTime)(id self, SEL _cmd, id contentsOfXml, id mpdUrl, id config, id mpdConfig, id source, id currentTime, NSError **error) = NULL;
-static id Hook_PresDesc_WithContentsOfXml_CurTime(id self, SEL _cmd, id contentsOfXml, id mpdUrl, id config, id mpdConfig, id source, id currentTime, NSError **error) {
-    id pruned = PruneManifestXml(contentsOfXml);
-    if (orig_presDesc_xml_curTime) {
-        return orig_presDesc_xml_curTime(self, _cmd, pruned ? pruned : contentsOfXml, mpdUrl, config, mpdConfig, source, currentTime, error);
-    }
-    return nil;
+    s_inPresDescHook = NO;
+    return result;
 }
 
 // IGVideo Inlined Manifest Accessor Hooks
+// Selectors: -[IGVideo dashManifest] & -[IGVideo dashManifestData]
+// Signature: @16@0:8 (Standard zero-argument instance accessors)
 static NSData * (*orig_video_dashManifest)(id self, SEL _cmd) = NULL;
+static __thread BOOL s_inDashManifestHook = NO;
 static NSData * Hook_IGVideo_DashManifest(id self, SEL _cmd) {
+    if (s_inDashManifestHook) {
+        return orig_video_dashManifest ? orig_video_dashManifest(self, _cmd) : nil;
+    }
+    s_inDashManifestHook = YES;
     NSData *orig = orig_video_dashManifest ? orig_video_dashManifest(self, _cmd) : nil;
-    if (!orig) return nil;
-    return (NSData *)PruneManifestXml(orig);
+    NSData *pruned = orig ? (NSData *)PruneManifestXml(orig) : nil;
+    s_inDashManifestHook = NO;
+    return pruned ? pruned : orig;
 }
 
 static NSData * (*orig_video_dashManifestData)(id self, SEL _cmd) = NULL;
+static __thread BOOL s_inDashManifestDataHook = NO;
 static NSData * Hook_IGVideo_DashManifestData(id self, SEL _cmd) {
+    if (s_inDashManifestDataHook) {
+        return orig_video_dashManifestData ? orig_video_dashManifestData(self, _cmd) : nil;
+    }
+    s_inDashManifestDataHook = YES;
     NSData *orig = orig_video_dashManifestData ? orig_video_dashManifestData(self, _cmd) : nil;
-    if (!orig) return nil;
-    return (NSData *)PruneManifestXml(orig);
+    NSData *pruned = orig ? (NSData *)PruneManifestXml(orig) : nil;
+    s_inDashManifestDataHook = NO;
+    return pruned ? pruned : orig;
 }
 
 // ============================================================================
@@ -799,26 +805,6 @@ static void HookVTDecompressionSessionCreateOnce(void) {
 }
 
 // FNFDecompressionSessionForVP9X
-static id (*orig_vp9x_init)(id self, SEL _cmd, id delegate, void *formatDesc, CGSize videoSize, BOOL async, void *config, id pcm, NSError **error) = NULL;
-
-static id Hook_FNFDecompressionSessionForVP9X_Init(id self, SEL _cmd, id delegate, void *formatDesc, CGSize videoSize, BOOL async, void *config, id pcm, NSError **error) {
-    if (config) {
-        uint8_t *cfg = (uint8_t *)config;
-        cfg[0x59] = 1; // enableVTForVP9
-        cfg[0x58] = 1; // enableVTHWAcceleratedDetection
-        cfg[0x74] = 1; // fixVP9DecoderRegistrationRace
-        cfg[0x38] = 0; // enableVP9VTDecodingDimensionCheck
-        cfg[0x33] = 0; // disableVTAsynchronousDecompression
-        cfg[0x34] = 0; // disableVT1xRealTimePlayback
-        cfg[0x35] = 0; // disableVTTemporalProcessing
-    }
-
-    if (orig_vp9x_init) {
-        return orig_vp9x_init(self, _cmd, delegate, formatDesc, videoSize, async, config, pcm, error);
-    }
-    return nil;
-}
-
 static BOOL (*orig_vp9x_usesSoftwareDecoder)(id self, SEL _cmd) = NULL;
 static BOOL Hook_FNFDecompressionSessionForVP9X_UsesSoftwareDecoder(id self, SEL _cmd) {
     return NO;
@@ -859,20 +845,13 @@ static void Hook_FNFVideoPlayer_PlayWithReason(id self, SEL _cmd, NSInteger reas
 // ============================================================================
 
 static void SwizzleDashClasses(void) {
-    // 1. Root Manifest Parser Hooks on FNFMediaPresentationDescription
+    // 1. Root Manifest Parser Hook on FNFMediaPresentationDescription
+    // Swizzle ONLY the public class method +[FNFMediaPresentationDescription presentationDescriptionWithContentsOfXml:mpdUrl:error:]
+    // which has standard pointer arguments (@40@0:8@16@24^@32).
     Class presDescCls = objc_getClass("FNFMediaPresentationDescription");
     if (presDescCls) {
-        SEL sel1 = sel_registerName("presentationDescriptionWithContentsOfXml:mpdUrl:config:mpdConfig:source:error:");
-        SafeSwizzleClassMethod(presDescCls, sel1, (IMP)Hook_PresDesc_WithContentsOfXml_Config, (IMP *)&orig_presDesc_xml_config);
-        SafeSwizzleMethod(presDescCls, sel1, (IMP)Hook_PresDesc_WithContentsOfXml_Config, (IMP *)&orig_presDesc_xml_config);
-
-        SEL sel2 = sel_registerName("presentationDescriptionWithContentsOfXml:mpdUrl:error:");
-        SafeSwizzleClassMethod(presDescCls, sel2, (IMP)Hook_PresDesc_WithContentsOfXml_Error, (IMP *)&orig_presDesc_xml_error);
-        SafeSwizzleMethod(presDescCls, sel2, (IMP)Hook_PresDesc_WithContentsOfXml_Error, (IMP *)&orig_presDesc_xml_error);
-
-        SEL sel3 = sel_registerName("_presentationDescriptionWithContentsOfXml:mpdUrl:config:mpdConfig:source:currentTime:error:");
-        SafeSwizzleClassMethod(presDescCls, sel3, (IMP)Hook_PresDesc_WithContentsOfXml_CurTime, (IMP *)&orig_presDesc_xml_curTime);
-        SafeSwizzleMethod(presDescCls, sel3, (IMP)Hook_PresDesc_WithContentsOfXml_CurTime, (IMP *)&orig_presDesc_xml_curTime);
+        SEL sel = sel_registerName("presentationDescriptionWithContentsOfXml:mpdUrl:error:");
+        SafeSwizzleClassMethod(presDescCls, sel, (IMP)Hook_PresDesc_WithContentsOfXml_Error, (IMP *)&orig_presDesc_xml_error);
     }
 
     // 2. Inlined Manifest Accessors on IGVideo
@@ -887,10 +866,6 @@ static void SwizzleDashClasses(void) {
     // 3. Apple VideoToolbox Hardware VP9 Decoder
     Class vp9xCls = objc_getClass("FNFDecompressionSessionForVP9X");
     if (vp9xCls) {
-        SafeSwizzleMethod(vp9xCls,
-                          sel_registerName("initWithDelegate:sampleBufferFormatDescription:videoSize:async:config:playerConfigManager:error:"),
-                          (IMP)Hook_FNFDecompressionSessionForVP9X_Init,
-                          (IMP *)&orig_vp9x_init);
         SafeSwizzleMethod(vp9xCls,
                           sel_registerName("usesSoftwareDecoder"),
                           (IMP)Hook_FNFDecompressionSessionForVP9X_UsesSoftwareDecoder,
