@@ -385,7 +385,7 @@ static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrid
                    (repId && [repId containsString:@"1080"]) ||
                    (tag && [tag containsString:@"1080"])));
 
-    NSString *quality = is1440 ? @"1440p" : (is1080 ? @"1080p" : [NSString stringWithFormat:@"%.0fp", minDim > 0.0f ? minDim : 1080.0f]);
+    NSString *quality = is1440 ? @"1440p" : @"1080p";
     NSString *resolution = (sz.width > 0.0f && sz.height > 0.0f) ? [NSString stringWithFormat:@"%.0fx%.0f", sz.width, sz.height] : (is1440 ? @"1440x2560" : @"1080x1920");
 
     BOOL changed = NO;
@@ -419,6 +419,8 @@ struct VideoRepInfo {
     uint32_t height;
     uint64_t bandwidth;
     NSString *repId;
+    BOOL is1440;
+    BOOL is1080;
 };
 
 static id PruneManifestXml(id contentsOfXml) {
@@ -478,7 +480,7 @@ static id PruneManifestXml(id contentsOfXml) {
             NSRange beforeRange = NSMakeRange(0, repRange.location);
             NSRange lastAdaptationSet = [xmlStr rangeOfString:@"<AdaptationSet" options:NSBackwardsSearch range:beforeRange];
             if (lastAdaptationSet.location != NSNotFound) {
-                NSRange adaptHeaderRange = NSMakeRange(lastAdaptationSet.location, MIN((NSUInteger)300, xmlStr.length - lastAdaptationSet.location));
+                NSRange adaptHeaderRange = NSMakeRange(lastAdaptationSet.location, MIN((NSUInteger)500, xmlStr.length - lastAdaptationSet.location));
                 NSString *adaptHeader = [xmlStr substringWithRange:adaptHeaderRange];
                 if ([adaptHeader rangeOfString:@"audio"].location != NSNotFound) {
                     continue;
@@ -516,13 +518,44 @@ static id PruneManifestXml(id contentsOfXml) {
                 repId = [repBlock substringWithRange:[idMatch rangeAtIndex:1]];
             }
 
-            if (w > 0 || h > 0 || [repBlock rangeOfString:@"video/"].location != NSNotFound) {
+            // Inherit dimensions from parent AdaptationSet if not present on Representation tag
+            if ((w == 0 || h == 0) && lastAdaptationSet.location != NSNotFound) {
+                NSRange adaptHeaderRange = NSMakeRange(lastAdaptationSet.location, MIN((NSUInteger)500, xmlStr.length - lastAdaptationSet.location));
+                NSString *adaptHeader = [xmlStr substringWithRange:adaptHeaderRange];
+                if (w == 0) {
+                    NSTextCheckingResult *awMatch = [s_widthRegex firstMatchInString:adaptHeader options:0 range:NSMakeRange(0, adaptHeader.length)];
+                    if (awMatch && awMatch.numberOfRanges > 1) {
+                        w = (uint32_t)[[adaptHeader substringWithRange:[awMatch rangeAtIndex:1]] intValue];
+                    }
+                }
+                if (h == 0) {
+                    NSTextCheckingResult *ahMatch = [s_heightRegex firstMatchInString:adaptHeader options:0 range:NSMakeRange(0, adaptHeader.length)];
+                    if (ahMatch && ahMatch.numberOfRanges > 1) {
+                        h = (uint32_t)[[adaptHeader substringWithRange:[ahMatch rangeAtIndex:1]] intValue];
+                    }
+                }
+            }
+
+            uint64_t pixels = (uint64_t)w * h;
+            BOOL repIs1440 = (w >= 1200 || h >= 2200 || pixels >= 2800000ULL ||
+                              (repId && ([repId containsString:@"1440"] || [repId containsString:@"2k"] || [repId containsString:@"1539525017490074"] || [repId containsString:@"968238693007748"])) ||
+                              [repBlock containsString:@"1440p"] || [repBlock containsString:@"1440P"] ||
+                              [repBlock containsString:@"FBQualityLabel=\"1440"] || [repBlock containsString:@"qualityLabel=\"1440"]);
+
+            BOOL repIs1080 = (!repIs1440 && (w >= 960 || h >= 1700 || pixels >= 1600000ULL ||
+                              (repId && [repId containsString:@"1080"]) ||
+                              [repBlock containsString:@"1080p"] || [repBlock containsString:@"1080P"] ||
+                              [repBlock containsString:@"FBQualityLabel=\"1080"] || [repBlock containsString:@"qualityLabel=\"1080"]));
+
+            if (w > 0 || h > 0 || repIs1440 || repIs1080 || [repBlock rangeOfString:@"video/"].location != NSNotFound) {
                 VideoRepInfo info;
                 info.range = repRange;
                 info.width = w;
                 info.height = h;
                 info.bandwidth = bw;
                 info.repId = repId;
+                info.is1440 = repIs1440;
+                info.is1080 = repIs1080;
                 videoReps.push_back(info);
             }
         }
@@ -536,30 +569,16 @@ static id PruneManifestXml(id contentsOfXml) {
         BOOL has1080 = NO;
 
         for (size_t i = 0; i < videoReps.size(); i++) {
-            uint32_t w = videoReps[i].width;
-            uint32_t h = videoReps[i].height;
-            uint64_t pixels = (uint64_t)w * h;
-            NSString *rid = videoReps[i].repId;
-            if (w >= 1200 || h >= 2200 || pixels >= 2800000ULL ||
-                (rid && ([rid containsString:@"1440"] || [rid containsString:@"2k"] || [rid containsString:@"1539525017490074"] || [rid containsString:@"968238693007748"]))) {
-                has1440 = YES;
-            }
-            if (w >= 960 || h >= 1700 || pixels >= 1600000ULL || (rid && [rid containsString:@"1080"])) {
-                has1080 = YES;
-            }
+            if (videoReps[i].is1440) has1440 = YES;
+            if (videoReps[i].is1080) has1080 = YES;
         }
 
         if (mode == InstagramDash1440pModeWifiOnly && isCellular) {
             // Mode 1 on Cellular: Cap to 1080p
             uint64_t bestMetric = 0;
             for (size_t i = 0; i < videoReps.size(); i++) {
-                uint32_t w = videoReps[i].width;
-                uint32_t h = videoReps[i].height;
-                uint64_t pixels = (uint64_t)w * h;
-                NSString *rid = videoReps[i].repId;
-                BOOL is1440 = (w >= 1200 || h >= 2200 || pixels >= 2800000ULL || (rid && ([rid containsString:@"1440"] || [rid containsString:@"2k"])));
-                if (!is1440) {
-                    uint64_t metric = pixels * 10000000ULL + videoReps[i].bandwidth;
+                if (!videoReps[i].is1440) {
+                    uint64_t metric = (videoReps[i].is1080 ? 1000000000000ULL : 0) + (uint64_t)videoReps[i].width * videoReps[i].height * 10000ULL + videoReps[i].bandwidth;
                     if (targetIdx == -1 || metric > bestMetric) {
                         bestMetric = metric;
                         targetIdx = (int)i;
@@ -571,12 +590,7 @@ static id PruneManifestXml(id contentsOfXml) {
             if (has1440) {
                 uint64_t bestBw = 0;
                 for (size_t i = 0; i < videoReps.size(); i++) {
-                    uint32_t w = videoReps[i].width;
-                    uint32_t h = videoReps[i].height;
-                    uint64_t pixels = (uint64_t)w * h;
-                    NSString *rid = videoReps[i].repId;
-                    BOOL is1440 = (w >= 1200 || h >= 2200 || pixels >= 2800000ULL || (rid && ([rid containsString:@"1440"] || [rid containsString:@"2k"])));
-                    if (is1440) {
+                    if (videoReps[i].is1440) {
                         if (targetIdx == -1 || videoReps[i].bandwidth > bestBw) {
                             bestBw = videoReps[i].bandwidth;
                             targetIdx = (int)i;
@@ -586,12 +600,7 @@ static id PruneManifestXml(id contentsOfXml) {
             } else if (has1080) {
                 uint64_t bestBw = 0;
                 for (size_t i = 0; i < videoReps.size(); i++) {
-                    uint32_t w = videoReps[i].width;
-                    uint32_t h = videoReps[i].height;
-                    uint64_t pixels = (uint64_t)w * h;
-                    NSString *rid = videoReps[i].repId;
-                    BOOL is1080 = (w >= 960 || h >= 1700 || pixels >= 1600000ULL || (rid && [rid containsString:@"1080"]));
-                    if (is1080) {
+                    if (videoReps[i].is1080) {
                         if (targetIdx == -1 || videoReps[i].bandwidth > bestBw) {
                             bestBw = videoReps[i].bandwidth;
                             targetIdx = (int)i;
@@ -601,8 +610,19 @@ static id PruneManifestXml(id contentsOfXml) {
             }
         }
 
+        // If neither 1440p nor 1080p is available (e.g. video only uploaded in 720p), pick highest metric
         if (targetIdx == -1) {
-            targetIdx = 0;
+            uint64_t bestMetric = 0;
+            for (size_t i = 0; i < videoReps.size(); i++) {
+                uint64_t metric = (uint64_t)videoReps[i].width * videoReps[i].height * 10000ULL + videoReps[i].bandwidth;
+                if (targetIdx == -1 || metric > bestMetric) {
+                    bestMetric = metric;
+                    targetIdx = (int)i;
+                }
+            }
+            if (targetIdx == -1) {
+                targetIdx = 0;
+            }
         }
 
         NSMutableString *prunedStr = [xmlStr mutableCopy];
@@ -697,9 +717,30 @@ static id Hook_PresDesc_WithContentsOfXml_Error(id self, SEL _cmd, id contentsOf
     return result;
 }
 
-// IGVideo Inlined Manifest Accessor Hooks
-// Selectors: -[IGVideo dashManifest] & -[IGVideo dashManifestData]
-// Signature: @16@0:8 (Standard zero-argument instance accessors)
+// IGVideo Manifest Accessor & Mutator Hooks
+// Selectors: -[IGVideo videoDashManifest], -[IGVideo setVideoDashManifest:],
+//            -[IGVideo dashManifest], -[IGVideo dashManifestData], -[IGVideo setDashManifestData:]
+static id (*orig_video_videoDashManifest)(id self, SEL _cmd) = NULL;
+static __thread BOOL s_inVideoDashManifestHook = NO;
+static id Hook_IGVideo_VideoDashManifest(id self, SEL _cmd) {
+    if (s_inVideoDashManifestHook) {
+        return orig_video_videoDashManifest ? orig_video_videoDashManifest(self, _cmd) : nil;
+    }
+    s_inVideoDashManifestHook = YES;
+    id orig = orig_video_videoDashManifest ? orig_video_videoDashManifest(self, _cmd) : nil;
+    id pruned = orig ? PruneManifestXml(orig) : nil;
+    s_inVideoDashManifestHook = NO;
+    return pruned ? pruned : orig;
+}
+
+static void (*orig_video_setVideoDashManifest)(id self, SEL _cmd, id manifest) = NULL;
+static void Hook_IGVideo_SetVideoDashManifest(id self, SEL _cmd, id manifest) {
+    id pruned = manifest ? PruneManifestXml(manifest) : nil;
+    if (orig_video_setVideoDashManifest) {
+        orig_video_setVideoDashManifest(self, _cmd, pruned ? pruned : manifest);
+    }
+}
+
 static NSData * (*orig_video_dashManifest)(id self, SEL _cmd) = NULL;
 static __thread BOOL s_inDashManifestHook = NO;
 static NSData * Hook_IGVideo_DashManifest(id self, SEL _cmd) {
@@ -724,6 +765,25 @@ static NSData * Hook_IGVideo_DashManifestData(id self, SEL _cmd) {
     NSData *pruned = orig ? (NSData *)PruneManifestXml(orig) : nil;
     s_inDashManifestDataHook = NO;
     return pruned ? pruned : orig;
+}
+
+static void (*orig_video_setDashManifestData)(id self, SEL _cmd, id manifestData) = NULL;
+static void Hook_IGVideo_SetDashManifestData(id self, SEL _cmd, id manifestData) {
+    id pruned = manifestData ? PruneManifestXml(manifestData) : nil;
+    if (orig_video_setDashManifestData) {
+        orig_video_setDashManifestData(self, _cmd, pruned ? pruned : manifestData);
+    }
+}
+
+// FNFDashPlayerSizePruner Hook: Prevent discarding 1440p/1080p due to device screen size
+static id (*orig_playerSizePruner_pruneQualities)(id self, SEL _cmd, id qualities) = NULL;
+static id Hook_PlayerSizePruner_PruneQualities(id self, SEL _cmd, id qualities) {
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    if (mode == InstagramDash1440pModeDisabled) {
+        return orig_playerSizePruner_pruneQualities ? orig_playerSizePruner_pruneQualities(self, _cmd, qualities) : qualities;
+    }
+    // Return all qualities unpruned so 1440p and 1080p are preserved
+    return qualities;
 }
 
 // ============================================================================
@@ -854,14 +914,28 @@ static void SwizzleDashClasses(void) {
         SafeSwizzleClassMethod(presDescCls, sel, (IMP)Hook_PresDesc_WithContentsOfXml_Error, (IMP *)&orig_presDesc_xml_error);
     }
 
-    // 2. Inlined Manifest Accessors on IGVideo
+    // 2. Inlined Manifest Accessors and Mutators on IGVideo
     Class videoCls = objc_getClass("IGVideo");
     if (videoCls) {
+        SafeSwizzleMethod(videoCls, sel_registerName("videoDashManifest"),
+                          (IMP)Hook_IGVideo_VideoDashManifest, (IMP *)&orig_video_videoDashManifest);
+        SafeSwizzleMethod(videoCls, sel_registerName("setVideoDashManifest:"),
+                          (IMP)Hook_IGVideo_SetVideoDashManifest, (IMP *)&orig_video_setVideoDashManifest);
         SafeSwizzleMethod(videoCls, sel_registerName("dashManifest"),
                           (IMP)Hook_IGVideo_DashManifest, (IMP *)&orig_video_dashManifest);
         SafeSwizzleMethod(videoCls, sel_registerName("dashManifestData"),
                           (IMP)Hook_IGVideo_DashManifestData, (IMP *)&orig_video_dashManifestData);
+        SafeSwizzleMethod(videoCls, sel_registerName("setDashManifestData:"),
+                          (IMP)Hook_IGVideo_SetDashManifestData, (IMP *)&orig_video_setDashManifestData);
     }
+
+    // 3. Screen Size Pruner Bypass on FNFDashPlayerSizePruner
+    Class prunerCls = objc_getClass("FNFDashPlayerSizePruner");
+    if (prunerCls) {
+        SafeSwizzleMethod(prunerCls, sel_registerName("pruneQualities:"),
+                          (IMP)Hook_PlayerSizePruner_PruneQualities, (IMP *)&orig_playerSizePruner_pruneQualities);
+    }
+
 
     // 3. Apple VideoToolbox Hardware VP9 Decoder
     Class vp9xCls = objc_getClass("FNFDecompressionSessionForVP9X");
