@@ -34,6 +34,18 @@ static NSString *g_currentResolution = @"";
 static NSString *g_currentRepresentationId = @"ready";
 static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
 
+static NSMutableDictionary *g_repMetadataCache = nil;
+static pthread_mutex_t g_cacheMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static __weak id g_activePlayingPlayer = nil;
+static pthread_mutex_t g_playerMutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Forward declarations
+static CGSize GetRepresentationPixelDimensions(id rep);
+static NSString *GetRepresentationId(id rep);
+static uint64_t GetRepresentationBitrate(id rep);
+static BOOL IsAudioRepresentation(id rep);
+
 // Zero-overhead logging stub
 #define DashLog(...) do {} while(0)
 
@@ -385,9 +397,6 @@ static NSString *GetRepresentationEncodingTag(id rep) {
 // Representation Metadata Cache & Active Reel Player Telemetry
 // ============================================================================
 
-static NSMutableDictionary *g_repMetadataCache = nil;
-static pthread_mutex_t g_cacheMutex = PTHREAD_MUTEX_INITIALIZER;
-
 static void CacheRepresentationMetadata(id rep) {
     if (!rep) return;
     id actual = ExtractRepresentationFromObject(rep);
@@ -412,9 +421,6 @@ static void CacheRepresentationMetadata(id rep) {
     };
     pthread_mutex_unlock(&g_cacheMutex);
 }
-
-static __weak id g_activePlayingPlayer = nil;
-static pthread_mutex_t g_playerMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrideRepId, NSString *overrideTag) {
     if (!player) return;
@@ -1004,14 +1010,6 @@ static id Hook_ABR_SelectQualityFromReps(id self, SEL _cmd, NSArray *representat
     return (representations && representations.count > 0) ? representations.firstObject : nil;
 }
 
-static BOOL Hook_ReturnNO(id self, SEL _cmd, id rep, BOOL isIntentional) {
-    return NO;
-}
-
-static BOOL Hook_ReturnYES(id self, SEL _cmd) {
-    return YES;
-}
-
 // FNFDashPlaylist Hook: Ensure video startup default representation is strictly 1440p (or 1080p fallback)
 static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
 static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
@@ -1056,14 +1054,6 @@ static CGSize Hook_Return1440pViewPortSize(id self, SEL _cmd) {
         return orig_meta_viewPortSize(self, _cmd);
     }
     return CGSizeMake(1440.0f, 2560.0f);
-}
-
-// Bandwidth Providers Hook: Boost to 100 Mbps
-static double Hook_ReturnHighBandwidth(id self, SEL _cmd) {
-    if (!InstagramDash1440p_IsForce1440pActive()) {
-        return 5000000.0;
-    }
-    return 100000000.0; // 100 Mbps
 }
 
 // ============================================================================
@@ -1223,8 +1213,6 @@ static void SwizzleDashClasses(void) {
                           (IMP)Hook_ABR_SelectQualitySeqIndices, (IMP *)&orig_ABR_selectQualitySeqIndices);
         SafeSwizzleMethod(abrCls, sel_registerName("_selectQualityFromRepresentations:withAvailableBandwidth:"),
                           (IMP)Hook_ABR_SelectQualityFromReps, (IMP *)&orig_ABR_selectQualityWithBw);
-        SafeSwizzleMethod(abrCls, sel_registerName("_shouldAvoidOnABR:isIntentional:"),
-                          (IMP)Hook_ReturnNO, NULL);
     }
 
     // 5. Force 1440p Default Video Representation in FNFDashPlaylist
@@ -1234,26 +1222,12 @@ static void SwizzleDashClasses(void) {
                           (IMP)Hook_Playlist_DefaultRepresentationForTrack, (IMP *)&orig_playlist_defaultRepresentationForTrack);
     }
 
-    // 6. Force 1440p Viewport, Screen Size & Ignore-Avoid-On-Cell in FNFDashVideoPlayerMetadata
+    // 6. Force 1440p Viewport & Screen Size in FNFDashVideoPlayerMetadata
     Class metaCls = objc_getClass("FNFDashVideoPlayerMetadata");
     if (metaCls) {
         SafeSwizzleMethod(metaCls, sel_registerName("size"), (IMP)Hook_Return1440pSize, (IMP *)&orig_meta_size);
         SafeSwizzleMethod(metaCls, sel_registerName("screenSize"), (IMP)Hook_Return1440pScreenSize, (IMP *)&orig_meta_screenSize);
         SafeSwizzleMethod(metaCls, sel_registerName("viewPortSize"), (IMP)Hook_Return1440pViewPortSize, (IMP *)&orig_meta_viewPortSize);
-        SafeSwizzleMethod(metaCls, sel_registerName("ignoreAvoidOnCell"), (IMP)Hook_ReturnYES, NULL);
-    }
-
-    // 7. Boost Bandwidth Providers to 100+ Mbps
-    const char *bandwidthClasses[] = {
-        "FNFBandwidthProvider",
-        "IGBandwidthEstimator",
-        "IGFNFBandwidthProvider",
-        "IGMediaHistoricalBandwidthEstimateProvider"
-    };
-    for (size_t i = 0; i < sizeof(bandwidthClasses) / sizeof(bandwidthClasses[0]); i++) {
-        Class bCls = objc_getClass(bandwidthClasses[i]);
-        if (!bCls) continue;
-        SafeSwizzleMethod(bCls, sel_registerName("downloadBandwidthEstimateBitsPerSecond"), (IMP)Hook_ReturnHighBandwidth, NULL);
     }
 
 

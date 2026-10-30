@@ -1349,7 +1349,11 @@ static float QueryCurrentGPU(void) {
 static PerfNetStats QueryCurrentNetStats(void) {
     PerfNetStats stats = {0, 0, 0, 0};
     struct ifaddrs *interfaces = NULL;
-    if ((InstagramWifiSpoofer_GetRawIfAddrs ? InstagramWifiSpoofer_GetRawIfAddrs(&interfaces) : getifaddrs(&interfaces)) == 0 && interfaces) {
+    int ret = InstagramWifiSpoofer_GetRawIfAddrs(&interfaces);
+    if (ret != 0) {
+        ret = getifaddrs(&interfaces);
+    }
+    if (ret == 0 && interfaces) {
         struct ifaddrs *ifa = interfaces;
         while (ifa) {
             if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_LINK) {
