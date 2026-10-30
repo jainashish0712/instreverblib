@@ -787,6 +787,242 @@ static id Hook_PlayerSizePruner_PruneQualities(id self, SEL _cmd, id qualities) 
 }
 
 // ============================================================================
+// Core Representation Selection & Quality Forcing Helpers
+// ============================================================================
+
+static BOOL IsAudioRepresentation(id rep) {
+    if (!rep) return NO;
+    if ([rep respondsToSelector:@selector(isAudio)]) {
+        if (((BOOL (*)(id, SEL))objc_msgSend)(rep, @selector(isAudio))) return YES;
+    }
+    if ([rep respondsToSelector:@selector(track)]) {
+        NSInteger tr = ((NSInteger (*)(id, SEL))objc_msgSend)(rep, @selector(track));
+        if (tr == 2) return YES;
+    }
+    if ([rep respondsToSelector:@selector(representationId)]) {
+        NSString *repId = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(representationId));
+        if (repId && [repId hasSuffix:@"a"]) return YES;
+    }
+    return NO;
+}
+
+static CGSize GetRepresentationPixelDimensions(id rep) {
+    if (!rep) return CGSizeZero;
+    CGSize sz = CGSizeZero;
+    if ([rep respondsToSelector:@selector(videoSize)]) {
+        sz = ((CGSize (*)(id, SEL))objc_msgSend)(rep, @selector(videoSize));
+    }
+    if (sz.width <= 0.0f || sz.height <= 0.0f) {
+        if ([rep respondsToSelector:@selector(size)]) {
+            sz = ((CGSize (*)(id, SEL))objc_msgSend)(rep, @selector(size));
+        }
+    }
+    if (sz.width <= 0.0f || sz.height <= 0.0f) {
+        CGFloat w = 0, h = 0;
+        if ([rep respondsToSelector:@selector(videoWidth)]) {
+            w = (CGFloat)((NSInteger (*)(id, SEL))objc_msgSend)(rep, @selector(videoWidth));
+        } else if ([rep respondsToSelector:@selector(width)]) {
+            w = (CGFloat)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(width));
+        }
+        if ([rep respondsToSelector:@selector(videoHeight)]) {
+            h = (CGFloat)((NSInteger (*)(id, SEL))objc_msgSend)(rep, @selector(videoHeight));
+        } else if ([rep respondsToSelector:@selector(height)]) {
+            h = (CGFloat)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(height));
+        }
+        if (w > 0 && h > 0) {
+            sz = CGSizeMake(w, h);
+        }
+    }
+    return sz;
+}
+
+static id SelectHighestRepresentation(NSArray *representations) {
+    if (!representations || ![representations isKindOfClass:[NSArray class]] || representations.count == 0) {
+        return nil;
+    }
+
+    id first = representations.firstObject;
+    if (IsAudioRepresentation(first)) {
+        return first;
+    }
+
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    if (mode == InstagramDash1440pModeDisabled) {
+        return representations.firstObject;
+    }
+
+    BOOL isCellular = InstagramWifiSpoofer_IsCellularData();
+    BOOL capTo1080p = (mode == InstagramDash1440pModeWifiOnly && isCellular);
+
+    id rep1440p = nil;
+    uint64_t maxBw1440 = 0;
+    id rep1080p = nil;
+    uint64_t maxBw1080 = 0;
+    id repHighest = nil;
+    uint64_t maxPixels = 0;
+    uint64_t maxBwHighest = 0;
+
+    for (id rep in representations) {
+        if (!rep || IsAudioRepresentation(rep)) continue;
+
+        CGSize sz = GetRepresentationPixelDimensions(rep);
+        uint64_t pixels = (uint64_t)(sz.width * sz.height);
+        uint64_t bw = 0;
+        if ([rep respondsToSelector:@selector(bandwidth)]) {
+            bw = (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(bandwidth));
+        } else if ([rep respondsToSelector:@selector(bitrate)]) {
+            bw = (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(bitrate));
+        }
+
+        NSString *repId = nil;
+        if ([rep respondsToSelector:@selector(representationId)]) {
+            repId = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(representationId));
+        }
+
+        CGFloat minDim = MIN(sz.width, sz.height);
+        CGFloat maxDim = MAX(sz.width, sz.height);
+
+        BOOL is1440 = (minDim >= 1200.0f || maxDim >= 2200.0f || pixels >= 2800000ULL ||
+                       (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"968238693007748"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])));
+
+        BOOL is1080 = (!is1440 && (minDim >= 960.0f || maxDim >= 1700.0f || pixels >= 1600000ULL ||
+                       (repId && [repId containsString:@"1080"])));
+
+        if (capTo1080p && is1440) {
+            continue; // Skip 1440p on cellular in Mode 1
+        }
+
+        if (is1440) {
+            if (!rep1440p || bw > maxBw1440) {
+                rep1440p = rep;
+                maxBw1440 = bw;
+            }
+        } else if (is1080) {
+            if (!rep1080p || bw > maxBw1080) {
+                rep1080p = rep;
+                maxBw1080 = bw;
+            }
+        }
+
+        if (pixels > maxPixels) {
+            maxPixels = pixels;
+            maxBwHighest = bw;
+            repHighest = rep;
+        } else if (pixels == maxPixels && bw > maxBwHighest) {
+            maxBwHighest = bw;
+            repHighest = rep;
+        }
+    }
+
+    id chosen = (!capTo1080p && rep1440p) ? rep1440p : (rep1080p ?: repHighest ?: representations.firstObject);
+    return chosen;
+}
+
+// ABR Quality Selector Hooks
+struct CxxVectorInt {
+    int *begin;
+    int *end;
+    int *cap;
+};
+
+static id (*orig_ABR_selectQualitySeqIndices)(id self, SEL _cmd, NSArray *representations, struct CxxVectorInt seqIndices, double bandwidth) = NULL;
+static id Hook_ABR_SelectQualitySeqIndices(id self, SEL _cmd, NSArray *representations, struct CxxVectorInt seqIndices, double bandwidth) {
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    if (mode != InstagramDash1440pModeDisabled && representations && [representations isKindOfClass:[NSArray class]] && representations.count > 0) {
+        id chosen = SelectHighestRepresentation(representations);
+        if (chosen) {
+            return chosen;
+        }
+    }
+    if (orig_ABR_selectQualitySeqIndices) {
+        return orig_ABR_selectQualitySeqIndices(self, _cmd, representations, seqIndices, bandwidth);
+    }
+    return (representations && representations.count > 0) ? representations.firstObject : nil;
+}
+
+static id (*orig_ABR_selectQualityWithBw)(id self, SEL _cmd, NSArray *representations, double bandwidth) = NULL;
+static id Hook_ABR_SelectQualityFromReps(id self, SEL _cmd, NSArray *representations, double bandwidth) {
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    if (mode != InstagramDash1440pModeDisabled && representations && [representations isKindOfClass:[NSArray class]] && representations.count > 0) {
+        id chosen = SelectHighestRepresentation(representations);
+        if (chosen) {
+            return chosen;
+        }
+    }
+    if (orig_ABR_selectQualityWithBw) {
+        return orig_ABR_selectQualityWithBw(self, _cmd, representations, bandwidth);
+    }
+    return (representations && representations.count > 0) ? representations.firstObject : nil;
+}
+
+static BOOL Hook_ReturnNO(id self, SEL _cmd, id rep, BOOL isIntentional) {
+    return NO;
+}
+
+static BOOL Hook_ReturnYES(id self, SEL _cmd) {
+    return YES;
+}
+
+// FNFDashPlaylist Hook: Ensure video startup default representation is strictly 1440p (or 1080p fallback)
+static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
+static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    if (track == 1 && mode != InstagramDash1440pModeDisabled) {
+        NSArray *reps = nil;
+        if ([self respondsToSelector:@selector(representationsForTrack:)]) {
+            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), 1);
+        }
+        if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
+            id highest = SelectHighestRepresentation(reps);
+            if (highest) {
+                return highest;
+            }
+        }
+    }
+    if (orig_playlist_defaultRepresentationForTrack) {
+        return orig_playlist_defaultRepresentationForTrack(self, _cmd, track);
+    }
+    return nil;
+}
+
+// FNFDashVideoPlayerMetadata Hooks: Force 1440x2560 Viewport & Screen Dimensions
+static CGSize (*orig_meta_size)(id self, SEL _cmd) = NULL;
+static CGSize Hook_Return1440pSize(id self, SEL _cmd) {
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    if (mode == InstagramDash1440pModeDisabled && orig_meta_size) {
+        return orig_meta_size(self, _cmd);
+    }
+    return CGSizeMake(1440.0f, 2560.0f);
+}
+
+static CGSize (*orig_meta_screenSize)(id self, SEL _cmd) = NULL;
+static CGSize Hook_Return1440pScreenSize(id self, SEL _cmd) {
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    if (mode == InstagramDash1440pModeDisabled && orig_meta_screenSize) {
+        return orig_meta_screenSize(self, _cmd);
+    }
+    return CGSizeMake(1440.0f, 2560.0f);
+}
+
+static CGSize (*orig_meta_viewPortSize)(id self, SEL _cmd) = NULL;
+static CGSize Hook_Return1440pViewPortSize(id self, SEL _cmd) {
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    if (mode == InstagramDash1440pModeDisabled && orig_meta_viewPortSize) {
+        return orig_meta_viewPortSize(self, _cmd);
+    }
+    return CGSizeMake(1440.0f, 2560.0f);
+}
+
+// Bandwidth Providers Hook: Boost to 100 Mbps
+static double Hook_ReturnHighBandwidth(id self, SEL _cmd) {
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    if (mode == InstagramDash1440pModeDisabled) {
+        return 5000000.0;
+    }
+    return 100000000.0; // 100 Mbps
+}
+
+// ============================================================================
 // Hardware VP9 Decoding via VideoToolbox
 // ============================================================================
 
@@ -934,6 +1170,46 @@ static void SwizzleDashClasses(void) {
     if (prunerCls) {
         SafeSwizzleMethod(prunerCls, sel_registerName("pruneQualities:"),
                           (IMP)Hook_PlayerSizePruner_PruneQualities, (IMP *)&orig_playerSizePruner_pruneQualities);
+    }
+
+    // 4. Force 1440p Selection in FNFDashABRQualitySelector
+    Class abrCls = objc_getClass("FNFDashABRQualitySelector");
+    if (abrCls) {
+        SafeSwizzleMethod(abrCls, sel_registerName("_selectQualityFromRepresentations:sequenceIndices:withAvailableBandwidth:"),
+                          (IMP)Hook_ABR_SelectQualitySeqIndices, (IMP *)&orig_ABR_selectQualitySeqIndices);
+        SafeSwizzleMethod(abrCls, sel_registerName("_selectQualityFromRepresentations:withAvailableBandwidth:"),
+                          (IMP)Hook_ABR_SelectQualityFromReps, (IMP *)&orig_ABR_selectQualityWithBw);
+        SafeSwizzleMethod(abrCls, sel_registerName("_shouldAvoidOnABR:isIntentional:"),
+                          (IMP)Hook_ReturnNO, NULL);
+    }
+
+    // 5. Force 1440p Default Video Representation in FNFDashPlaylist
+    Class playlistCls = objc_getClass("FNFDashPlaylist");
+    if (playlistCls) {
+        SafeSwizzleMethod(playlistCls, sel_registerName("defaultRepresentationForTrack:"),
+                          (IMP)Hook_Playlist_DefaultRepresentationForTrack, (IMP *)&orig_playlist_defaultRepresentationForTrack);
+    }
+
+    // 6. Force 1440p Viewport, Screen Size & Ignore-Avoid-On-Cell in FNFDashVideoPlayerMetadata
+    Class metaCls = objc_getClass("FNFDashVideoPlayerMetadata");
+    if (metaCls) {
+        SafeSwizzleMethod(metaCls, sel_registerName("size"), (IMP)Hook_Return1440pSize, (IMP *)&orig_meta_size);
+        SafeSwizzleMethod(metaCls, sel_registerName("screenSize"), (IMP)Hook_Return1440pScreenSize, (IMP *)&orig_meta_screenSize);
+        SafeSwizzleMethod(metaCls, sel_registerName("viewPortSize"), (IMP)Hook_Return1440pViewPortSize, (IMP *)&orig_meta_viewPortSize);
+        SafeSwizzleMethod(metaCls, sel_registerName("ignoreAvoidOnCell"), (IMP)Hook_ReturnYES, NULL);
+    }
+
+    // 7. Boost Bandwidth Providers to 100+ Mbps
+    const char *bandwidthClasses[] = {
+        "FNFBandwidthProvider",
+        "IGBandwidthEstimator",
+        "IGFNFBandwidthProvider",
+        "IGMediaHistoricalBandwidthEstimateProvider"
+    };
+    for (size_t i = 0; i < sizeof(bandwidthClasses) / sizeof(bandwidthClasses[0]); i++) {
+        Class bCls = objc_getClass(bandwidthClasses[i]);
+        if (!bCls) continue;
+        SafeSwizzleMethod(bCls, sel_registerName("downloadBandwidthEstimateBitsPerSecond"), (IMP)Hook_ReturnHighBandwidth, NULL);
     }
 
 

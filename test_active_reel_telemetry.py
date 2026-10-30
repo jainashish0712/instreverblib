@@ -25,8 +25,8 @@ def test_resolution_classification():
         (1088.0, 1920.0, "968240619674222v", "dash-hd", "1080p", "1088x1920"),
         # Standard 1080p
         (1080.0, 1920.0, "1080p_stream_id", "1080p", "1080p", "1080x1920"),
-        # 720p stream
-        (720.0, 1280.0, "720p_stream_id", "720p", "720p", "720x1280"),
+        # Stream under 1440p (strictly falls back to 1080p floor, never displays sub-1080p label)
+        (720.0, 1280.0, "720p_stream_id", "720p", "1080p", "720x1280"),
     ]
     
     for w, h, repId, tag, exp_q, exp_res in cases:
@@ -41,7 +41,7 @@ def test_resolution_classification():
         is1080 = (not is1440 and (minDim >= 960.0 or maxDim >= 1700.0 or pixels >= 1600000 or
                   "1080" in repId or "1080" in tag))
                   
-        quality = "1440p" if is1440 else ("1080p" if is1080 else f"{int(minDim)}p")
+        quality = "1440p" if is1440 else "1080p"
         res = f"{int(w)}x{int(h)}"
         
         assert quality == exp_q, f"Failed for {repId}: expected {exp_q}, got {quality}"
@@ -134,12 +134,12 @@ def test_codebase_isolation():
     assert "UpdateActiveRepresentation" not in src, "Found stale UpdateActiveRepresentation in source code!"
     print("   -> PASS: Stale UpdateActiveRepresentation completely eliminated")
     
-    # Check that root manifest pruning is present and obsolete runtime playlist hooks are retired
+    # Check that root manifest pruning and 1440p ABR forcing hooks are active
     assert "PruneManifestXml" in src
-    assert "Hook_Playlist_RepresentationsForTrack" not in src
-    assert "Hook_Playlist_DefaultRepresentationForTrack" not in src
+    assert "Hook_ABR_SelectQualitySeqIndices" in src
+    assert "Hook_Playlist_DefaultRepresentationForTrack" in src
     assert "UpdateActivePlaybackTelemetryFromPlayer" in src
-    print("   -> PASS: Root manifest pruner is active and obsolete runtime playlist hooks are cleanly retired")
+    print("   -> PASS: Root manifest pruner and 1440p ABR forcing hooks are fully active")
 
 def test_video_player_swizzles():
     print("[4/5] Testing IGFNFVideoPlayer swizzle coverage...")
