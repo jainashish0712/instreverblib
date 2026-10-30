@@ -40,11 +40,18 @@ static pthread_mutex_t g_cacheMutex = PTHREAD_MUTEX_INITIALIZER;
 static __weak id g_activePlayingPlayer = nil;
 static pthread_mutex_t g_playerMutex = PTHREAD_MUTEX_INITIALIZER;
 
+static __weak id g_forcedCurrentPlayer = nil;
+static __weak id g_forcedCurrentPlaylist = nil;
+static id g_forced1440pRep = nil;
+
 // Forward declarations
 static CGSize GetRepresentationPixelDimensions(id rep);
 static NSString *GetRepresentationId(id rep);
+static NSString *GetRepresentationEncodingTag(id rep);
 static uint64_t GetRepresentationBitrate(id rep);
 static BOOL IsAudioRepresentation(id rep);
+static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrideRepId, NSString *overrideTag);
+static void ResetForceIfNavigatedAwayFromForcedReel(id player);
 
 // Zero-overhead logging stub
 #define DashLog(...) do {} while(0)
@@ -78,105 +85,169 @@ InstagramDash1440pCheckResult InstagramDash1440p_ForceCheckAndFetch1440p(void) {
 
     if (active) {
         // Toggle OFF -> Return to Instagram default behavior
-        InstagramDash1440p_SetForce1440pActive(NO);
+        pthread_mutex_lock(&g_stateMutex);
+        g_force1440pActive = NO;
+        g_forcedCurrentPlayer = nil;
+        g_forcedCurrentPlaylist = nil;
+        g_forced1440pRep = nil;
+        g_dashMode = InstagramDash1440pModeDisabled;
+        pthread_mutex_unlock(&g_stateMutex);
+
         pthread_mutex_lock(&g_playerMutex);
         id player = g_activePlayingPlayer;
         pthread_mutex_unlock(&g_playerMutex);
         if (player) {
+            id pl = nil;
+            if ([player respondsToSelector:@selector(playlist)]) {
+                @try { pl = ((id (*)(id, SEL))objc_msgSend)(player, @selector(playlist)); } @catch (...) {}
+            }
+            if (!pl) {
+                @try { pl = [player valueForKey:@"playlist"]; } @catch (...) {}
+            }
+            if (pl && [pl respondsToSelector:@selector(removeExcessiveChunksInQueueForTrack:)]) {
+                @try { ((void (*)(id, SEL, NSInteger))objc_msgSend)(pl, @selector(removeExcessiveChunksInQueueForTrack:), 0); } @catch (...) {}
+            }
             SEL selQ = sel_registerName("selectQuality");
             if ([player respondsToSelector:selQ]) {
-                @try {
-                    ((void (*)(id, SEL))objc_msgSend)(player, selQ);
-                } @catch (...) {}
+                @try { ((void (*)(id, SEL))objc_msgSend)(player, selQ); } @catch (...) {}
             }
         }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
+        });
         return InstagramDash1440pCheckResultDisabled;
     }
 
-    // Check if 1440p is available for the current reel
-    BOOL has1440 = NO;
-
-    // 1. Check last parsed manifest
-    pthread_mutex_lock(&g_lastVideoMutex);
-    if (g_lastVideoHas1440) {
-        has1440 = YES;
-    }
-    pthread_mutex_unlock(&g_lastVideoMutex);
-
-    // 2. Check metadata cache
-    if (!has1440) {
-        pthread_mutex_lock(&g_cacheMutex);
-        for (NSString *key in g_repMetadataCache) {
-            NSDictionary *d = g_repMetadataCache[key];
-            CGFloat w = [d[@"width"] doubleValue];
-            CGFloat h = [d[@"height"] doubleValue];
-            NSString *tag = d[@"tag"];
-            CGFloat minDim = MIN(w, h);
-            CGFloat maxDim = MAX(w, h);
-            uint64_t pixels = (uint64_t)(w * h);
-            if (minDim >= 1200.0f || maxDim >= 2200.0f || pixels >= 2800000ULL ||
-                (key && ([key containsString:@"1539525017490074"] || [key containsString:@"968238693007748"] || [key containsString:@"1440"] || [key containsString:@"2k"])) ||
-                (tag && ([tag containsString:@"1440"] || [tag containsString:@"2k"]))) {
-                has1440 = YES;
-                break;
-            }
-        }
-        pthread_mutex_unlock(&g_cacheMutex);
-    }
-
-    // 3. Check active player representations
+    // Identify the active on-screen reel
     pthread_mutex_lock(&g_playerMutex);
     id player = g_activePlayingPlayer;
     pthread_mutex_unlock(&g_playerMutex);
 
-    if (player && !has1440) {
-        NSArray *reps = nil;
+    id playlist = nil;
+    if (player) {
         if ([player respondsToSelector:@selector(playlist)]) {
-            @try {
-                id pl = ((id (*)(id, SEL))objc_msgSend)(player, @selector(playlist));
-                if (pl && [pl respondsToSelector:@selector(representationsForTrack:)]) {
-                    reps = ((NSArray * (*)(id, SEL, NSInteger))objc_msgSend)(pl, @selector(representationsForTrack:), 1);
-                }
-            } @catch (...) {}
+            @try { playlist = ((id (*)(id, SEL))objc_msgSend)(player, @selector(playlist)); } @catch (...) {}
         }
-        if (reps && reps.count > 0) {
-            for (id rep in reps) {
-                CGSize sz = GetRepresentationPixelDimensions(rep);
-                uint64_t px = (uint64_t)(sz.width * sz.height);
-                CGFloat minDim = MIN(sz.width, sz.height);
-                CGFloat maxDim = MAX(sz.width, sz.height);
-                NSString *rid = nil;
-                if ([rep respondsToSelector:@selector(representationId)]) {
-                    rid = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(representationId));
-                }
-                if (minDim >= 1200.0f || maxDim >= 2200.0f || px >= 2800000ULL ||
-                    (rid && ([rid containsString:@"1539525017490074"] || [rid containsString:@"968238693007748"] || [rid containsString:@"1440"] || [rid containsString:@"2k"]))) {
-                    has1440 = YES;
-                    break;
+        if (!playlist) {
+            @try { playlist = [player valueForKey:@"playlist"]; } @catch (...) {}
+        }
+    }
+
+    // Inspect representations of the current watching reel (Track 0 is Video in FNF)
+    id rep1440 = nil;
+    NSArray *reps = nil;
+
+    if (playlist) {
+        if ([playlist respondsToSelector:@selector(representationsForTrack:)]) {
+            @try { reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 0); } @catch (...) {}
+        }
+        if (!reps || reps.count == 0) {
+            if ([playlist respondsToSelector:@selector(allRepresentationsForTrack:)]) {
+                @try { reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(allRepresentationsForTrack:), 0); } @catch (...) {}
+            }
+        }
+        if (!reps || reps.count == 0) {
+            if ([playlist respondsToSelector:@selector(_representationsForVideoTrack)]) {
+                @try { reps = ((NSArray *(*)(id, SEL))objc_msgSend)(playlist, @selector(_representationsForVideoTrack)); } @catch (...) {}
+            }
+        }
+        if (!reps || reps.count == 0) {
+            if ([playlist respondsToSelector:@selector(representationsForTrack:)]) {
+                @try { reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(representationsForTrack:), 1); } @catch (...) {}
+            }
+        }
+    }
+
+    if (reps && reps.count > 0) {
+        uint64_t maxBw = 0;
+        for (id rep in reps) {
+            if (!rep || IsAudioRepresentation(rep)) continue;
+            CGSize sz = GetRepresentationPixelDimensions(rep);
+            uint64_t px = (uint64_t)(sz.width * sz.height);
+            CGFloat minDim = MIN(sz.width, sz.height);
+            CGFloat maxDim = MAX(sz.width, sz.height);
+            NSString *rid = GetRepresentationId(rep);
+            NSString *tag = GetRepresentationEncodingTag(rep);
+            uint64_t bw = GetRepresentationBitrate(rep);
+
+            if (minDim >= 1200.0f || maxDim >= 2200.0f || px >= 2800000ULL ||
+                (rid && ([rid containsString:@"1539525017490074"] || [rid containsString:@"968238693007748"] || [rid containsString:@"1440"] || [rid containsString:@"2k"])) ||
+                (tag && ([tag containsString:@"1440"] || [tag containsString:@"2k"]))) {
+                if (!rep1440 || bw > maxBw) {
+                    rep1440 = rep;
+                    maxBw = bw;
                 }
             }
         }
     }
 
-    if (player && !has1440) {
-        // Player is active, but 1440p master is not available for this reel
-        return InstagramDash1440pCheckResult1440pNotAvailable;
+    // If not found directly on playlist, check metadata cache and last parsed manifest
+    if (!rep1440) {
+        pthread_mutex_lock(&g_lastVideoMutex);
+        BOOL hasManifest1440 = g_lastVideoHas1440;
+        pthread_mutex_unlock(&g_lastVideoMutex);
+
+        if (!hasManifest1440 && player) {
+            // Reel does NOT have 1440p master available on CDN
+            return InstagramDash1440pCheckResult1440pNotAvailable;
+        }
     }
 
-    // 1440p found (or armed if player not active yet)
-    InstagramDash1440p_SetForce1440pActive(YES);
+    // Lock force 1440p for THIS current watching reel only
+    pthread_mutex_lock(&g_stateMutex);
+    g_force1440pActive = YES;
+    g_forcedCurrentPlayer = player;
+    g_forcedCurrentPlaylist = playlist;
+    g_forced1440pRep = rep1440;
+    g_dashMode = InstagramDash1440pModeAlways1440p;
+    pthread_mutex_unlock(&g_stateMutex);
 
-    // If player is active and has selectQuality, trigger it
-    if (player) {
-        SEL selQ = sel_registerName("selectQuality");
-        if ([player respondsToSelector:selQ]) {
+    // Instantly & seamlessly fetch and switch the active player to 1440p
+    if (playlist && rep1440) {
+        if ([playlist respondsToSelector:@selector(setDefaultRepresentation:track:)]) {
+            @try { ((void (*)(id, SEL, id, NSInteger))objc_msgSend)(playlist, @selector(setDefaultRepresentation:track:), rep1440, 0); } @catch (...) {}
+        }
+        if ([playlist respondsToSelector:@selector(updateDefaultRepresentationForTrack:)]) {
+            @try { ((void (*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(updateDefaultRepresentationForTrack:), 0); } @catch (...) {}
+        }
+        // Flush excessive queued unplayed chunks on video track 0 so next chunk is fetched in 1440p immediately
+        if ([playlist respondsToSelector:@selector(removeExcessiveChunksInQueueForTrack:)]) {
+            @try { ((void (*)(id, SEL, NSInteger))objc_msgSend)(playlist, @selector(removeExcessiveChunksInQueueForTrack:), 0); } @catch (...) {}
+        }
+
+        // Trigger quality selection on playlist's quality selector
+        const char *qsKeys[] = {"_abrQualitySelector", "abrQualitySelector", "_qualitySelector", "qualitySelector"};
+        for (size_t i = 0; i < sizeof(qsKeys)/sizeof(qsKeys[0]); i++) {
             @try {
-                ((void (*)(id, SEL))objc_msgSend)(player, selQ);
+                id qs = [playlist valueForKey:[NSString stringWithUTF8String:qsKeys[i]]];
+                if (qs && [qs respondsToSelector:@selector(selectQuality)]) {
+                    ((void (*)(id, SEL))objc_msgSend)(qs, @selector(selectQuality));
+                }
+            } @catch (...) {}
+            @try {
+                id qs = [player valueForKey:[NSString stringWithUTF8String:qsKeys[i]]];
+                if (qs && [qs respondsToSelector:@selector(selectQuality)]) {
+                    ((void (*)(id, SEL))objc_msgSend)(qs, @selector(selectQuality));
+                }
             } @catch (...) {}
         }
     }
 
-    return player ? InstagramDash1440pCheckResult1440pFoundAndForced : InstagramDash1440pCheckResultArmed;
+    if (player) {
+        SEL selQ = sel_registerName("selectQuality");
+        if ([player respondsToSelector:selQ]) {
+            @try { ((void (*)(id, SEL))objc_msgSend)(player, selQ); } @catch (...) {}
+        }
+        if (rep1440) {
+            UpdateActivePlaybackTelemetryFromPlayer(player, GetRepresentationId(rep1440), GetRepresentationEncodingTag(rep1440));
+        }
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
+    });
+
+    return (player && rep1440) ? InstagramDash1440pCheckResult1440pFoundAndForced : InstagramDash1440pCheckResultArmed;
 }
 
 InstagramDash1440pMode InstagramDash1440p_GetMode(void) {
@@ -312,13 +383,18 @@ static BOOL IsAudioRepresentation(id rep) {
     }
     if ([actual respondsToSelector:@selector(track)]) {
         NSInteger tr = ((NSInteger (*)(id, SEL))objc_msgSend)(actual, @selector(track));
-        if (tr == 2) return YES;
-        if (tr == 1) return NO; // Track 1 is Video
+        if (tr == 1) return YES; // Track 1 is Audio in FNF
+        if (tr == 0) return NO;  // Track 0 is Video in FNF
+        if (tr == 2) return YES; // Captions/Secondary audio
     }
     if ([actual respondsToSelector:@selector(representationId)]) {
         NSString *repId = ((NSString *(*)(id, SEL))objc_msgSend)(actual, @selector(representationId));
         if (repId && [repId hasSuffix:@"a"]) return YES;
         if (repId && [repId hasSuffix:@"v"]) return NO;
+    }
+    if ([actual respondsToSelector:@selector(encodingTag)]) {
+        NSString *tag = ((NSString *(*)(id, SEL))objc_msgSend)(actual, @selector(encodingTag));
+        if (tag && [tag containsString:@"audio"]) return YES;
     }
     return NO;
 }
@@ -899,10 +975,7 @@ static void Hook_IGVideo_SetDashManifestData(id self, SEL _cmd, id manifestData)
 // FNFDashPlayerSizePruner Hook: Prevent discarding 1440p/1080p due to device screen size
 static id (*orig_playerSizePruner_pruneQualities)(id self, SEL _cmd, id qualities) = NULL;
 static id Hook_PlayerSizePruner_PruneQualities(id self, SEL _cmd, id qualities) {
-    if (!InstagramDash1440p_IsForce1440pActive()) {
-        return orig_playerSizePruner_pruneQualities ? orig_playerSizePruner_pruneQualities(self, _cmd, qualities) : qualities;
-    }
-    // Return all qualities unpruned so 1440p and 1080p are preserved
+    // Return all qualities unpruned so 1440p and 1080p remain present in the playlist
     return qualities;
 }
 
@@ -924,6 +997,14 @@ static id SelectHighestRepresentation(NSArray *representations) {
         return representations.firstObject;
     }
 
+    // Return locked forced 1440p representation if set and present
+    pthread_mutex_lock(&g_stateMutex);
+    id forcedRep = g_forced1440pRep;
+    pthread_mutex_unlock(&g_stateMutex);
+    if (forcedRep && [representations containsObject:forcedRep]) {
+        return forcedRep;
+    }
+
     id rep1440p = nil;
     uint64_t maxBw1440 = 0;
     id rep1080p = nil;
@@ -939,15 +1020,18 @@ static id SelectHighestRepresentation(NSArray *representations) {
         uint64_t pixels = (uint64_t)(sz.width * sz.height);
         uint64_t bw = GetRepresentationBitrate(rep);
         NSString *repId = GetRepresentationId(rep);
+        NSString *tag = GetRepresentationEncodingTag(rep);
 
         CGFloat minDim = MIN(sz.width, sz.height);
         CGFloat maxDim = MAX(sz.width, sz.height);
 
         BOOL is1440 = (minDim >= 1200.0f || maxDim >= 2200.0f || pixels >= 2800000ULL ||
-                       (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"968238693007748"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])));
+                       (repId && ([repId containsString:@"1539525017490074"] || [repId containsString:@"968238693007748"] || [repId containsString:@"1440"] || [repId containsString:@"2k"])) ||
+                       (tag && ([tag containsString:@"1440"] || [tag containsString:@"2k"])));
 
         BOOL is1080 = (!is1440 && (minDim >= 960.0f || maxDim >= 1700.0f || pixels >= 1600000ULL ||
-                       (repId && [repId containsString:@"1080"])));
+                       (repId && [repId containsString:@"1080"]) ||
+                       (tag && [tag containsString:@"1080"])));
 
         if (is1440) {
             if (!rep1440p || bw > maxBw1440) {
@@ -1010,13 +1094,29 @@ static id Hook_ABR_SelectQualityFromReps(id self, SEL _cmd, NSArray *representat
     return (representations && representations.count > 0) ? representations.firstObject : nil;
 }
 
-// FNFDashPlaylist Hook: Ensure video startup default representation is strictly 1440p (or 1080p fallback)
+// FNFDashPlaylist Hook: Ensure video track 0 startup default representation is strictly 1440p (or 1080p fallback)
 static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
 static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
-    if (track == 1 && InstagramDash1440p_IsForce1440pActive()) {
+    if (track == 0 && InstagramDash1440p_IsForce1440pActive()) {
+        pthread_mutex_lock(&g_stateMutex);
+        id forced = g_forced1440pRep;
+        pthread_mutex_unlock(&g_stateMutex);
+        if (forced) {
+            return forced;
+        }
         NSArray *reps = nil;
         if ([self respondsToSelector:@selector(representationsForTrack:)]) {
-            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), 1);
+            reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), 0);
+        }
+        if (!reps || reps.count == 0) {
+            if ([self respondsToSelector:@selector(allRepresentationsForTrack:)]) {
+                reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(allRepresentationsForTrack:), 0);
+            }
+        }
+        if (!reps || reps.count == 0) {
+            if ([self respondsToSelector:@selector(_representationsForVideoTrack)]) {
+                reps = ((NSArray *(*)(id, SEL))objc_msgSend)(self, @selector(_representationsForVideoTrack));
+            }
         }
         if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
             id highest = SelectHighestRepresentation(reps);
@@ -1144,11 +1244,46 @@ static BOOL Hook_FNFDecompressionSessionForVP9X_UsesSoftwareDecoder(id self, SEL
 // IGFNFVideoPlayer Hooks: Strictly Track Currently Playing On-Screen Reel
 // ============================================================================
 
+static void ResetForceIfNavigatedAwayFromForcedReel(id player) {
+    if (!player) return;
+    pthread_mutex_lock(&g_stateMutex);
+    BOOL wasForced = g_force1440pActive;
+    id forcedPlayer = g_forcedCurrentPlayer;
+    id forcedPlaylist = g_forcedCurrentPlaylist;
+
+    id currentPlaylist = nil;
+    if ([player respondsToSelector:@selector(playlist)]) {
+        @try { currentPlaylist = ((id (*)(id, SEL))objc_msgSend)(player, @selector(playlist)); } @catch (...) {}
+    }
+    if (!currentPlaylist) {
+        @try { currentPlaylist = [player valueForKey:@"playlist"]; } @catch (...) {}
+    }
+
+    BOOL isDifferentPlayer = (forcedPlayer != nil && forcedPlayer != player);
+    BOOL isDifferentPlaylist = (forcedPlaylist != nil && currentPlaylist != nil && forcedPlaylist != currentPlaylist);
+
+    if (wasForced && (isDifferentPlayer || isDifferentPlaylist)) {
+        g_force1440pActive = NO;
+        g_forcedCurrentPlayer = nil;
+        g_forcedCurrentPlaylist = nil;
+        g_forced1440pRep = nil;
+        g_dashMode = InstagramDash1440pModeDisabled;
+        pthread_mutex_unlock(&g_stateMutex);
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
+        });
+    } else {
+        pthread_mutex_unlock(&g_stateMutex);
+    }
+}
+
 static void (*orig_FNFVideoPlayer_stateManagerTransitionToVideoStartedPlaying)(id self, SEL _cmd) = NULL;
 static void Hook_FNFVideoPlayer_StateManagerTransitionToVideoStartedPlaying(id self, SEL _cmd) {
     if (orig_FNFVideoPlayer_stateManagerTransitionToVideoStartedPlaying) {
         orig_FNFVideoPlayer_stateManagerTransitionToVideoStartedPlaying(self, _cmd);
     }
+    ResetForceIfNavigatedAwayFromForcedReel(self);
     UpdateActivePlaybackTelemetryFromPlayer(self, nil, nil);
 }
 
@@ -1157,6 +1292,7 @@ static void Hook_FNFVideoPlayer_VideoRepresentationIdChanged(id self, SEL _cmd, 
     if (orig_FNFVideoPlayer_videoRepresentationIdChanged) {
         orig_FNFVideoPlayer_videoRepresentationIdChanged(self, _cmd, repId, codec, encodingTag, audioRoleMetadata);
     }
+    ResetForceIfNavigatedAwayFromForcedReel(self);
     NSString *repIdStr = [repId isKindOfClass:[NSString class]] ? repId : (repId ? [NSString stringWithFormat:@"%@", repId] : nil);
     NSString *tagStr = [encodingTag isKindOfClass:[NSString class]] ? encodingTag : (encodingTag ? [NSString stringWithFormat:@"%@", encodingTag] : nil);
     UpdateActivePlaybackTelemetryFromPlayer(self, repIdStr, tagStr);
@@ -1167,6 +1303,7 @@ static void Hook_FNFVideoPlayer_PlayWithReason(id self, SEL _cmd, NSInteger reas
     if (orig_FNFVideoPlayer_playWithReason) {
         orig_FNFVideoPlayer_playWithReason(self, _cmd, reason, callsite);
     }
+    ResetForceIfNavigatedAwayFromForcedReel(self);
     UpdateActivePlaybackTelemetryFromPlayer(self, nil, nil);
 }
 

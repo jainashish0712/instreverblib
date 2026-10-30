@@ -723,9 +723,24 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         hudPan.delegate = self;
         [self addGestureRecognizer:hudPan];
 
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onDashStateChanged:)
+                                                     name:kInstagramDash1440pStateDidChangeNotification
+                                                   object:nil];
+
         [self refreshValues];
     }
     return self;
+}
+
+- (void)onDashStateChanged:(NSNotification *)note {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self refreshValues];
+    });
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
