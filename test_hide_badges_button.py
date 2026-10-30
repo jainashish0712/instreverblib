@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Targeted Verification for Hide Badges Button and DASH Badge Mode Toggle (InstagramReverb)
+Targeted Verification for Hide Badges Button and Force 1440p Button (InstagramReverb)
 """
 import re
 
 def verify_hide_badges_and_mode_toggle():
     print("==================================================================")
-    print("   HIDE BADGES BUTTON & BADGE MODE TOGGLE VERIFICATION AUDIT      ")
+    print("   HIDE BADGES & FORCE 1440P BUTTON VERIFICATION AUDIT            ")
     print("==================================================================")
 
     ui_path = "D:/apps/com.spotify.client-9.1.94-eeveedecrypter/InstagramReverb/InstagramReverbUI.m"
@@ -26,24 +26,26 @@ def verify_hide_badges_and_mode_toggle():
     assert "- (BOOL)areBadgesHidden;" in h_code
     assert "- (void)setBadgesHidden:(BOOL)hidden;" in h_code
     assert "- (void)toggleBadgesHidden;" in h_code
-    print("   [1/6] PASS: Header declarations for badge visibility control verified.")
+    assert "- (void)forceCheckAndFetch1440p;" in h_code
+    print("   [1/7] PASS: Header declarations for badge visibility and forceCheckAndFetch1440p verified.")
 
     # 2. Verify Button added below Reset Defaults in HUD
     assert "@property (nonatomic, strong) UIButton *hideBadgesBtn;" in ui_code
     assert "_hideBadgesBtn = [UIButton buttonWithType:UIButtonTypeSystem];" in ui_code
     assert "[_hideBadgesBtn addTarget:self action:@selector(toggleBadgesTapped)" in ui_code
     
-    # Check ordering in layoutSubviews: _resetBtn followed by _hideBadgesBtn
+    # Check ordering in layoutSubviews: _resetBtn followed by _hideBadgesBtn followed by _force1440pBtn
     reset_idx = ui_code.find("_resetBtn.frame = CGRectMake(pad, y, w, 20.0f);")
     hide_idx = ui_code.find("_hideBadgesBtn.frame = CGRectMake(pad, y, w, 20.0f);")
-    assert reset_idx != -1 and hide_idx != -1, "Both buttons must have correct layout frames"
-    assert reset_idx < hide_idx, "hideBadgesBtn must be laid out BELOW resetBtn!"
-    print("   [2/6] PASS: Hide Badges button is created and positioned directly below Reset to Defaults.")
+    force_idx = ui_code.find("_force1440pBtn.frame = CGRectMake(pad, y, w, 20.0f);")
+    assert reset_idx != -1 and hide_idx != -1 and force_idx != -1, "All 3 buttons must have correct layout frames"
+    assert reset_idx < hide_idx < force_idx, "force1440pBtn must be positioned directly BELOW hideBadgesBtn, which is below resetBtn!"
+    print("   [2/7] PASS: 'Force 1440p' button is positioned directly below 'Hide Badges'.")
 
     # 3. Verify Button state dynamic title in refreshValues
     assert "areBadgesHidden" in ui_code
     assert "[self.hideBadgesBtn setTitle:(badgesHidden ? @\"Show Badges\" : @\"Hide Badges\")" in ui_code
-    print("   [3/6] PASS: Button text dynamically updates between 'Hide Badges' and 'Show Badges'.")
+    print("   [3/7] PASS: Button text dynamically updates between 'Hide Badges' and 'Show Badges'.")
 
     # 4. Verify HUDManager visibility toggle, NSUserDefaults persistence & CPU optimization
     assert "toggleBadgesHidden" in ui_code
@@ -51,22 +53,25 @@ def verify_hide_badges_and_mode_toggle():
     assert "InstagramReverb_BadgesHidden" in ui_code
     assert "[self.perfPill stopPolling];" in ui_code
     assert "[self.perfPill startPolling];" in ui_code
-    print("   [4/6] PASS: Badge visibility persists in NSUserDefaults and suspends CPU telemetry polling when hidden.")
+    print("   [4/7] PASS: Badge visibility persists in NSUserDefaults and suspends CPU telemetry polling when hidden.")
 
     # 5. Verify startOverlay respects badge visibility
     assert "if (self.areBadgesHidden)" in ui_code
-    print("   [5/6] PASS: Overlay startup honors persistent hidden badge state without flicker.")
+    print("   [5/7] PASS: Overlay startup honors persistent hidden badge state without flicker.")
 
-    # 6. Verify DASH badge mode cycling
-    assert "InstagramDash1440p_CycleMode()" in ui_code
-    assert "InstagramDash1440pModeWifiOnly" in mm_code
-    assert "InstagramDash1440pModeAlways1440p" in mm_code
-    assert "InstagramDash1440pModeDisabled" in mm_code
-    assert "handleTap:" in ui_code
-    print("   [6/6] PASS: DASH Badge tap handler is verified: cycles between Mode 1 (WiFi), Mode 2 (All), and Mode 3 (Disabled).")
+    # 6. Verify Force 1440p Button tap handler & feedback
+    assert "force1440pTapped" in ui_code
+    assert "InstagramDash1440p_ForceCheckAndFetch1440p()" in ui_code
+    assert "1440p Forced!" in ui_code
+    assert "No 1440p (Max 1080p)" in ui_code
+    print("   [6/7] PASS: Force 1440p button tap handler checks CDN availability and reports status with haptics.")
+
+    # 7. Verify HUD Height fits all three buttons
+    assert "CGFloat hudH = 245.0f;" in ui_code
+    print("   [7/7] PASS: HUD panel height cleanly accommodates all three buttons (245pt).")
 
     print("==================================================================")
-    print("       ALL HIDE BADGES & MODE TOGGLE CHECKS PASSED (100%)!        ")
+    print("       ALL HIDE BADGES & FORCE 1440P CHECKS PASSED (100%)!        ")
     print("==================================================================")
 
 if __name__ == "__main__":

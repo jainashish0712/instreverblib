@@ -501,6 +501,9 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
 // 6. Hide / Show Badges Button (Below Reset to Defaults)
 @property (nonatomic, strong) UIButton *hideBadgesBtn;
+
+// 7. Force 1440p Button (Below Hide Badges)
+@property (nonatomic, strong) UIButton *force1440pBtn;
 @property (nonatomic, copy) void (^closeHandler)(void);
 
 - (void)refreshValues;
@@ -705,6 +708,16 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         [_hideBadgesBtn addTarget:self action:@selector(toggleBadgesTapped) forControlEvents:UIControlEventTouchUpInside];
         [_contentContainer addSubview:_hideBadgesBtn];
 
+        // 7. Force 1440p Button (Below Hide Badges)
+        _force1440pBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        [_force1440pBtn setTitle:@"Force 1440p" forState:UIControlStateNormal];
+        [_force1440pBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
+        _force1440pBtn.titleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightMedium];
+        _force1440pBtn.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.07f];
+        _force1440pBtn.layer.cornerRadius = 5.0f;
+        [_force1440pBtn addTarget:self action:@selector(force1440pTapped) forControlEvents:UIControlEventTouchUpInside];
+        [_contentContainer addSubview:_force1440pBtn];
+
         // Draggable Pan Gesture for HUD (without interfering with sliders or buttons)
         UIPanGestureRecognizer *hudPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         hudPan.delegate = self;
@@ -839,6 +852,10 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
     // 6. Hide Badges Button (Below Reset Defaults)
     _hideBadgesBtn.frame = CGRectMake(pad, y, w, 20.0f);
+    y += 20.0f + 3.0f;
+
+    // 7. Force 1440p Button (Below Hide Badges)
+    _force1440pBtn.frame = CGRectMake(pad, y, w, 20.0f);
 }
 
 - (void)refreshValues {
@@ -873,6 +890,16 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     // Hide / Show Badges Status
     BOOL badgesHidden = [[InstagramReverbHUDManager sharedManager] areBadgesHidden];
     [self.hideBadgesBtn setTitle:(badgesHidden ? @"Show Badges" : @"Hide Badges") forState:UIControlStateNormal];
+
+    // Force 1440p Status
+    BOOL isForced = InstagramDash1440p_IsForce1440pActive();
+    if (isForced) {
+        [self.force1440pBtn setTitle:@"1440p Forced" forState:UIControlStateNormal];
+        [self.force1440pBtn setTitleColor:[UIColor colorWithRed:0.0f green:0.9f blue:1.0f alpha:1.0f] forState:UIControlStateNormal];
+    } else {
+        [self.force1440pBtn setTitle:@"Force 1440p" forState:UIControlStateNormal];
+        [self.force1440pBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1008,6 +1035,34 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     [self refreshValues];
 }
 
+- (void)force1440pTapped {
+    InstagramDash1440pCheckResult res = InstagramDash1440p_ForceCheckAndFetch1440p();
+    if (res == InstagramDash1440pCheckResult1440pFoundAndForced) {
+        UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
+        [fb impactOccurred];
+        [_force1440pBtn setTitle:@"1440p Forced!" forState:UIControlStateNormal];
+        [_force1440pBtn setTitleColor:[UIColor colorWithRed:0.0f green:0.9f blue:1.0f alpha:1.0f] forState:UIControlStateNormal];
+    } else if (res == InstagramDash1440pCheckResult1440pNotAvailable) {
+        UINotificationFeedbackGenerator *fb = [[UINotificationFeedbackGenerator alloc] init];
+        [fb notificationOccurred:UINotificationFeedbackTypeWarning];
+        [_force1440pBtn setTitle:@"No 1440p (Max 1080p)" forState:UIControlStateNormal];
+        [_force1440pBtn setTitleColor:[UIColor colorWithRed:1.0f green:0.65f blue:0.0f alpha:1.0f] forState:UIControlStateNormal];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self refreshValues];
+        });
+    } else if (res == InstagramDash1440pCheckResultArmed) {
+        UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+        [fb impactOccurred];
+        [_force1440pBtn setTitle:@"1440p Armed (Next Reel)" forState:UIControlStateNormal];
+        [_force1440pBtn setTitleColor:[UIColor colorWithRed:0.0f green:0.9f blue:1.0f alpha:1.0f] forState:UIControlStateNormal];
+    } else { // Disabled / Reset
+        UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        [fb impactOccurred];
+        [_force1440pBtn setTitle:@"Force 1440p" forState:UIControlStateNormal];
+        [_force1440pBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
+    }
+}
+
 - (void)closeTapped {
     if (self.closeHandler) {
         self.closeHandler();
@@ -1106,31 +1161,18 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 }
 
 - (void)updateAppearance {
-    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    BOOL isForced = InstagramDash1440p_IsForce1440pActive();
     NSString *quality = InstagramDash1440p_GetCurrentQuality() ?: @"1440p";
     NSString *repId = InstagramDash1440p_GetCurrentRepresentationId() ?: @"ready";
-    BOOL is1440 = InstagramDash1440p_IsActual1440p();
 
     NSString *text = nil;
-    if (mode == InstagramDash1440pModeDisabled) {
+    if (!isForced) {
         text = [NSString stringWithFormat:@"OFF (IG Default): %@", repId];
         self.layer.borderColor = [UIColor colorWithWhite:0.6f alpha:0.45f].CGColor;
         self.statusDot.backgroundColor = [UIColor colorWithWhite:0.6f alpha:0.8f];
         self.titleLabel.textColor = [UIColor colorWithWhite:0.75f alpha:1.0f];
-    } else if (mode == InstagramDash1440pModeWifiOnly) {
-        BOOL isCell = InstagramWifiSpoofer_IsCellularData();
-        if (isCell) {
-            text = [NSString stringWithFormat:@"WiFi-1440p [Cell 1080p]: %@", repId];
-            self.layer.borderColor = [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:0.85f].CGColor;
-            self.statusDot.backgroundColor = [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:1.0f];
-        } else {
-            text = [NSString stringWithFormat:@"WiFi-1440p [%@]: %@", quality, repId];
-            self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.90f].CGColor;
-            self.statusDot.backgroundColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
-        }
-        self.titleLabel.textColor = [UIColor whiteColor];
-    } else { // InstagramDash1440pModeAlways1440p
-        text = [NSString stringWithFormat:@"All-1440p [%@]: %@", quality, repId];
+    } else {
+        text = [NSString stringWithFormat:@"Forced [%@]: %@", quality, repId];
         self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.95f].CGColor;
         self.statusDot.backgroundColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
         self.titleLabel.textColor = [UIColor whiteColor];
@@ -1594,6 +1636,10 @@ static NSString *FormatDataRate(double bytesPerSec) {
     [self setBadgesHidden:!_areBadgesHidden];
 }
 
+- (void)forceCheckAndFetch1440p {
+    InstagramDash1440p_ForceCheckAndFetch1440p();
+}
+
 - (UIWindowScene *)findActiveWindowScene {
     if (@available(iOS 13.0, *)) {
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -1757,7 +1803,7 @@ static NSString *FormatDataRate(double bytesPerSec) {
         CGFloat screenH = winBounds.size.height;
         CGFloat rightMargin = 10.0f;
         CGFloat hudW = roundf(screenW * 0.50f); // Exactly half-screen width
-        CGFloat hudH = 220.0f;                 // Scaled-down compact height with +/- steppers
+        CGFloat hudH = 245.0f;                 // Scaled-down compact height with buttons
         CGFloat hudX = screenW - hudW - rightMargin; // Right-hand corner docked
         CGFloat hudY = screenH - hudH - 95.0f;       // Bottom thumb sweep zone
 

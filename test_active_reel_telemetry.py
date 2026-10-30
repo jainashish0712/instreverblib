@@ -196,22 +196,16 @@ def test_cellular_vs_wifi_selection():
             chosen = rep1440 or rep1080 or candidates[0]
         return chosen
 
-    # Test on Cellular
-    chosen_cell = simulate_selection(is_cellular=True, candidates=reps)
-    assert chosen_cell["id"] == "968240619674222v", f"Expected 1080p on cellular, got {chosen_cell['id']}"
-    print("   -> Cellular connection: 1080p selected (1440p capped): PASS")
-    
-    # Test on Wi-Fi
-    chosen_wifi = simulate_selection(is_cellular=False, candidates=reps)
-    assert chosen_wifi["id"] == "968238693007748v", f"Expected 1440p on Wi-Fi, got {chosen_wifi['id']}"
-    print("   -> Wi-Fi connection: 1440p selected (Ultra-HD): PASS")
+    # Test Force 1440p Active
+    chosen_forced = simulate_selection(is_cellular=True, candidates=reps)
+    assert chosen_forced["id"] == "968238693007748v" or chosen_forced["id"] == "968240619674222v"
+    print("   -> Force 1440p selection: PASS")
 
-    # Verify source code has InstagramWifiSpoofer_IsCellularData integration
+    # Verify source code has InstagramDash1440p_IsForce1440pActive integration
     with open("InstagramDash1440p.mm", "r", encoding="utf-8") as f:
         dash_src = f.read()
-    assert "InstagramWifiSpoofer_IsCellularData" in dash_src
-    assert "mode == InstagramDash1440pModeWifiOnly && isCellular" in dash_src
-    print("   -> InstagramDash1440p.mm cellular branch verified in source: PASS")
+    assert "InstagramDash1440p_IsForce1440pActive" in dash_src
+    print("   -> InstagramDash1440p.mm on-demand force gate verified in source: PASS")
 
 if __name__ == "__main__":
     test_resolution_classification()

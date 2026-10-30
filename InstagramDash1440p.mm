@@ -22,10 +22,14 @@
 
 NSString * const kInstagramDash1440pStateDidChangeNotification = @"kInstagramDash1440pStateDidChangeNotification";
 
-// Default: Mode 1 (Wi-Fi 1440p, Cellular 1080p ceiling)
-static InstagramDash1440pMode g_dashMode = InstagramDash1440pModeWifiOnly;
+// Default: Disabled (Instagram handles default behavior on Wi-Fi and Cellular)
+static InstagramDash1440pMode g_dashMode = InstagramDash1440pModeDisabled;
+static BOOL g_force1440pActive = NO;
+static BOOL g_lastVideoHas1440 = NO;
+static pthread_mutex_t g_lastVideoMutex = PTHREAD_MUTEX_INITIALIZER;
+
 static BOOL g_isActual1440p = NO;
-static NSString *g_currentQuality = @"1440p";
+static NSString *g_currentQuality = @"1080p";
 static NSString *g_currentResolution = @"";
 static NSString *g_currentRepresentationId = @"ready";
 static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
@@ -37,6 +41,121 @@ static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
 // Public Control & Telemetry Interfaces
 // ============================================================================
 
+BOOL InstagramDash1440p_IsForce1440pActive(void) {
+    pthread_mutex_lock(&g_stateMutex);
+    BOOL active = g_force1440pActive;
+    pthread_mutex_unlock(&g_stateMutex);
+    return active;
+}
+
+void InstagramDash1440p_SetForce1440pActive(BOOL active) {
+    pthread_mutex_lock(&g_stateMutex);
+    g_force1440pActive = active;
+    g_dashMode = active ? InstagramDash1440pModeAlways1440p : InstagramDash1440pModeDisabled;
+    pthread_mutex_unlock(&g_stateMutex);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
+    });
+}
+
+InstagramDash1440pCheckResult InstagramDash1440p_ForceCheckAndFetch1440p(void) {
+    pthread_mutex_lock(&g_stateMutex);
+    BOOL active = g_force1440pActive;
+    pthread_mutex_unlock(&g_stateMutex);
+
+    if (active) {
+        // Toggle OFF -> Return to Instagram default behavior
+        InstagramDash1440p_SetForce1440pActive(NO);
+        return InstagramDash1440pCheckResultDisabled;
+    }
+
+    // Check if 1440p is available for the current reel
+    BOOL has1440 = NO;
+
+    // 1. Check last parsed manifest
+    pthread_mutex_lock(&g_lastVideoMutex);
+    if (g_lastVideoHas1440) {
+        has1440 = YES;
+    }
+    pthread_mutex_unlock(&g_lastVideoMutex);
+
+    // 2. Check metadata cache
+    if (!has1440) {
+        pthread_mutex_lock(&g_cacheMutex);
+        for (NSString *key in g_repMetadataCache) {
+            NSDictionary *d = g_repMetadataCache[key];
+            CGFloat w = [d[@"width"] doubleValue];
+            CGFloat h = [d[@"height"] doubleValue];
+            NSString *tag = d[@"tag"];
+            CGFloat minDim = MIN(w, h);
+            CGFloat maxDim = MAX(w, h);
+            uint64_t pixels = (uint64_t)(w * h);
+            if (minDim >= 1200.0f || maxDim >= 2200.0f || pixels >= 2800000ULL ||
+                (key && ([key containsString:@"1539525017490074"] || [key containsString:@"968238693007748"] || [key containsString:@"1440"] || [key containsString:@"2k"])) ||
+                (tag && ([tag containsString:@"1440"] || [tag containsString:@"2k"]))) {
+                has1440 = YES;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_cacheMutex);
+    }
+
+    // 3. Check active player representations
+    pthread_mutex_lock(&g_playerMutex);
+    id player = g_activePlayingPlayer;
+    pthread_mutex_unlock(&g_playerMutex);
+
+    if (player && !has1440) {
+        NSArray *reps = nil;
+        if ([player respondsToSelector:@selector(playlist)]) {
+            @try {
+                id pl = ((id (*)(id, SEL))objc_msgSend)(player, @selector(playlist));
+                if (pl && [pl respondsToSelector:@selector(representationsForTrack:)]) {
+                    reps = ((NSArray * (*)(id, SEL, NSInteger))objc_msgSend)(pl, @selector(representationsForTrack:), 1);
+                }
+            } @catch (...) {}
+        }
+        if (reps && reps.count > 0) {
+            for (id rep in reps) {
+                CGSize sz = GetRepresentationPixelDimensions(rep);
+                uint64_t px = (uint64_t)(sz.width * sz.height);
+                CGFloat minDim = MIN(sz.width, sz.height);
+                CGFloat maxDim = MAX(sz.width, sz.height);
+                NSString *rid = nil;
+                if ([rep respondsToSelector:@selector(representationId)]) {
+                    rid = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(representationId));
+                }
+                if (minDim >= 1200.0f || maxDim >= 2200.0f || px >= 2800000ULL ||
+                    (rid && ([rid containsString:@"1539525017490074"] || [rid containsString:@"968238693007748"] || [rid containsString:@"1440"] || [rid containsString:@"2k"]))) {
+                    has1440 = YES;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (player && !has1440) {
+        // Player is active, but 1440p master is not available for this reel
+        return InstagramDash1440pCheckResult1440pNotAvailable;
+    }
+
+    // 1440p found (or armed if player not active yet)
+    InstagramDash1440p_SetForce1440pActive(YES);
+
+    // If player is active and has selectQuality, trigger it
+    if (player) {
+        SEL selQ = sel_registerName("selectQuality");
+        if ([player respondsToSelector:selQ]) {
+            @try {
+                ((void (*)(id, SEL))objc_msgSend)(player, selQ);
+            } @catch (...) {}
+        }
+    }
+
+    return player ? InstagramDash1440pCheckResult1440pFoundAndForced : InstagramDash1440pCheckResultArmed;
+}
+
 InstagramDash1440pMode InstagramDash1440p_GetMode(void) {
     pthread_mutex_lock(&g_stateMutex);
     InstagramDash1440pMode m = g_dashMode;
@@ -47,6 +166,7 @@ InstagramDash1440pMode InstagramDash1440p_GetMode(void) {
 void InstagramDash1440p_SetMode(InstagramDash1440pMode mode) {
     pthread_mutex_lock(&g_stateMutex);
     g_dashMode = mode;
+    g_force1440pActive = (mode != InstagramDash1440pModeDisabled);
     pthread_mutex_unlock(&g_stateMutex);
 
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -55,47 +175,28 @@ void InstagramDash1440p_SetMode(InstagramDash1440pMode mode) {
 }
 
 InstagramDash1440pMode InstagramDash1440p_CycleMode(void) {
-    pthread_mutex_lock(&g_stateMutex);
-    if (g_dashMode == InstagramDash1440pModeWifiOnly) {
-        g_dashMode = InstagramDash1440pModeAlways1440p;
-    } else if (g_dashMode == InstagramDash1440pModeAlways1440p) {
-        g_dashMode = InstagramDash1440pModeDisabled;
-    } else {
-        g_dashMode = InstagramDash1440pModeWifiOnly;
-    }
-    InstagramDash1440pMode newMode = g_dashMode;
-    pthread_mutex_unlock(&g_stateMutex);
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:kInstagramDash1440pStateDidChangeNotification object:nil];
-    });
-    return newMode;
+    InstagramDash1440p_ForceCheckAndFetch1440p();
+    return InstagramDash1440p_GetMode();
 }
 
 NSString *InstagramDash1440p_GetModeName(void) {
-    InstagramDash1440pMode m = InstagramDash1440p_GetMode();
-    switch (m) {
-        case InstagramDash1440pModeWifiOnly:
-            return @"WiFi 1440p (Cell 1080p)";
-        case InstagramDash1440pModeAlways1440p:
-            return @"All 1440p (WiFi+Cell)";
-        case InstagramDash1440pModeDisabled:
-            return @"Disabled (IG Default)";
+    if (InstagramDash1440p_IsForce1440pActive()) {
+        return @"1440p Forced";
     }
-    return @"Unknown";
+    return @"Disabled (IG Default)";
 }
 
 BOOL InstagramDash1440p_IsEnabled(void) {
-    return InstagramDash1440p_GetMode() != InstagramDash1440pModeDisabled;
+    return InstagramDash1440p_IsForce1440pActive();
 }
 
 void InstagramDash1440p_SetEnabled(BOOL enabled) {
-    InstagramDash1440p_SetMode(enabled ? InstagramDash1440pModeWifiOnly : InstagramDash1440pModeDisabled);
+    InstagramDash1440p_SetForce1440pActive(enabled);
 }
 
 BOOL InstagramDash1440p_ToggleEnabled(void) {
-    InstagramDash1440pMode m = InstagramDash1440p_CycleMode();
-    return m != InstagramDash1440pModeDisabled;
+    InstagramDash1440p_ForceCheckAndFetch1440p();
+    return InstagramDash1440p_IsForce1440pActive();
 }
 
 BOOL InstagramDash1440p_IsActual1440p(void) {
@@ -425,10 +526,6 @@ struct VideoRepInfo {
 
 static id PruneManifestXml(id contentsOfXml) {
     if (!contentsOfXml) return nil;
-    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
-    if (mode == InstagramDash1440pModeDisabled) {
-        return contentsOfXml;
-    }
 
     @try {
         BOOL isData = [contentsOfXml isKindOfClass:[NSData class]];
@@ -445,6 +542,22 @@ static id PruneManifestXml(id contentsOfXml) {
         }
 
         if (!xmlStr || xmlStr.length == 0 || [xmlStr rangeOfString:@"<Representation"].location == NSNotFound) {
+            return contentsOfXml;
+        }
+
+        // Detect if this video manifest has a 1440p representation and cache it
+        BOOL has1440InXml = ([xmlStr rangeOfString:@"1440"].location != NSNotFound ||
+                             [xmlStr rangeOfString:@"2560"].location != NSNotFound ||
+                             [xmlStr rangeOfString:@"1539525017490074"].location != NSNotFound ||
+                             [xmlStr rangeOfString:@"968238693007748"].location != NSNotFound ||
+                             [xmlStr rangeOfString:@"2k"].location != NSNotFound ||
+                             [xmlStr rangeOfString:@"2K"].location != NSNotFound);
+        pthread_mutex_lock(&g_lastVideoMutex);
+        g_lastVideoHas1440 = has1440InXml;
+        pthread_mutex_unlock(&g_lastVideoMutex);
+
+        // If Force 1440p is NOT active: Leave manifest 100% untouched for Instagram's default behavior!
+        if (!InstagramDash1440p_IsForce1440pActive()) {
             return contentsOfXml;
         }
 
@@ -573,38 +686,24 @@ static id PruneManifestXml(id contentsOfXml) {
             if (videoReps[i].is1080) has1080 = YES;
         }
 
-        if (mode == InstagramDash1440pModeWifiOnly && isCellular) {
-            // Mode 1 on Cellular: Cap to 1080p
-            uint64_t bestMetric = 0;
+        // Force 1440p Active: Prioritize 1440p regardless of Wi-Fi or Cellular, fallback to 1080p floor
+        if (has1440) {
+            uint64_t bestBw = 0;
             for (size_t i = 0; i < videoReps.size(); i++) {
-                if (!videoReps[i].is1440) {
-                    uint64_t metric = (videoReps[i].is1080 ? 1000000000000ULL : 0) + (uint64_t)videoReps[i].width * videoReps[i].height * 10000ULL + videoReps[i].bandwidth;
-                    if (targetIdx == -1 || metric > bestMetric) {
-                        bestMetric = metric;
+                if (videoReps[i].is1440) {
+                    if (targetIdx == -1 || videoReps[i].bandwidth > bestBw) {
+                        bestBw = videoReps[i].bandwidth;
                         targetIdx = (int)i;
                     }
                 }
             }
-        } else {
-            // Mode 1 on Wi-Fi OR Mode 2 (Always 1440p): 1440p Priority, 1080p Fallback Floor
-            if (has1440) {
-                uint64_t bestBw = 0;
-                for (size_t i = 0; i < videoReps.size(); i++) {
-                    if (videoReps[i].is1440) {
-                        if (targetIdx == -1 || videoReps[i].bandwidth > bestBw) {
-                            bestBw = videoReps[i].bandwidth;
-                            targetIdx = (int)i;
-                        }
-                    }
-                }
-            } else if (has1080) {
-                uint64_t bestBw = 0;
-                for (size_t i = 0; i < videoReps.size(); i++) {
-                    if (videoReps[i].is1080) {
-                        if (targetIdx == -1 || videoReps[i].bandwidth > bestBw) {
-                            bestBw = videoReps[i].bandwidth;
-                            targetIdx = (int)i;
-                        }
+        } else if (has1080) {
+            uint64_t bestBw = 0;
+            for (size_t i = 0; i < videoReps.size(); i++) {
+                if (videoReps[i].is1080) {
+                    if (targetIdx == -1 || videoReps[i].bandwidth > bestBw) {
+                        bestBw = videoReps[i].bandwidth;
+                        targetIdx = (int)i;
                     }
                 }
             }
@@ -778,8 +877,7 @@ static void Hook_IGVideo_SetDashManifestData(id self, SEL _cmd, id manifestData)
 // FNFDashPlayerSizePruner Hook: Prevent discarding 1440p/1080p due to device screen size
 static id (*orig_playerSizePruner_pruneQualities)(id self, SEL _cmd, id qualities) = NULL;
 static id Hook_PlayerSizePruner_PruneQualities(id self, SEL _cmd, id qualities) {
-    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
-    if (mode == InstagramDash1440pModeDisabled) {
+    if (!InstagramDash1440p_IsForce1440pActive()) {
         return orig_playerSizePruner_pruneQualities ? orig_playerSizePruner_pruneQualities(self, _cmd, qualities) : qualities;
     }
     // Return all qualities unpruned so 1440p and 1080p are preserved
@@ -789,52 +887,6 @@ static id Hook_PlayerSizePruner_PruneQualities(id self, SEL _cmd, id qualities) 
 // ============================================================================
 // Core Representation Selection & Quality Forcing Helpers
 // ============================================================================
-
-static BOOL IsAudioRepresentation(id rep) {
-    if (!rep) return NO;
-    if ([rep respondsToSelector:@selector(isAudio)]) {
-        if (((BOOL (*)(id, SEL))objc_msgSend)(rep, @selector(isAudio))) return YES;
-    }
-    if ([rep respondsToSelector:@selector(track)]) {
-        NSInteger tr = ((NSInteger (*)(id, SEL))objc_msgSend)(rep, @selector(track));
-        if (tr == 2) return YES;
-    }
-    if ([rep respondsToSelector:@selector(representationId)]) {
-        NSString *repId = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(representationId));
-        if (repId && [repId hasSuffix:@"a"]) return YES;
-    }
-    return NO;
-}
-
-static CGSize GetRepresentationPixelDimensions(id rep) {
-    if (!rep) return CGSizeZero;
-    CGSize sz = CGSizeZero;
-    if ([rep respondsToSelector:@selector(videoSize)]) {
-        sz = ((CGSize (*)(id, SEL))objc_msgSend)(rep, @selector(videoSize));
-    }
-    if (sz.width <= 0.0f || sz.height <= 0.0f) {
-        if ([rep respondsToSelector:@selector(size)]) {
-            sz = ((CGSize (*)(id, SEL))objc_msgSend)(rep, @selector(size));
-        }
-    }
-    if (sz.width <= 0.0f || sz.height <= 0.0f) {
-        CGFloat w = 0, h = 0;
-        if ([rep respondsToSelector:@selector(videoWidth)]) {
-            w = (CGFloat)((NSInteger (*)(id, SEL))objc_msgSend)(rep, @selector(videoWidth));
-        } else if ([rep respondsToSelector:@selector(width)]) {
-            w = (CGFloat)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(width));
-        }
-        if ([rep respondsToSelector:@selector(videoHeight)]) {
-            h = (CGFloat)((NSInteger (*)(id, SEL))objc_msgSend)(rep, @selector(videoHeight));
-        } else if ([rep respondsToSelector:@selector(height)]) {
-            h = (CGFloat)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(height));
-        }
-        if (w > 0 && h > 0) {
-            sz = CGSizeMake(w, h);
-        }
-    }
-    return sz;
-}
 
 static id SelectHighestRepresentation(NSArray *representations) {
     if (!representations || ![representations isKindOfClass:[NSArray class]] || representations.count == 0) {
@@ -846,13 +898,9 @@ static id SelectHighestRepresentation(NSArray *representations) {
         return first;
     }
 
-    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
-    if (mode == InstagramDash1440pModeDisabled) {
+    if (!InstagramDash1440p_IsForce1440pActive()) {
         return representations.firstObject;
     }
-
-    BOOL isCellular = InstagramWifiSpoofer_IsCellularData();
-    BOOL capTo1080p = (mode == InstagramDash1440pModeWifiOnly && isCellular);
 
     id rep1440p = nil;
     uint64_t maxBw1440 = 0;
@@ -867,17 +915,8 @@ static id SelectHighestRepresentation(NSArray *representations) {
 
         CGSize sz = GetRepresentationPixelDimensions(rep);
         uint64_t pixels = (uint64_t)(sz.width * sz.height);
-        uint64_t bw = 0;
-        if ([rep respondsToSelector:@selector(bandwidth)]) {
-            bw = (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(bandwidth));
-        } else if ([rep respondsToSelector:@selector(bitrate)]) {
-            bw = (uint64_t)((uint32_t (*)(id, SEL))objc_msgSend)(rep, @selector(bitrate));
-        }
-
-        NSString *repId = nil;
-        if ([rep respondsToSelector:@selector(representationId)]) {
-            repId = ((NSString *(*)(id, SEL))objc_msgSend)(rep, @selector(representationId));
-        }
+        uint64_t bw = GetRepresentationBitrate(rep);
+        NSString *repId = GetRepresentationId(rep);
 
         CGFloat minDim = MIN(sz.width, sz.height);
         CGFloat maxDim = MAX(sz.width, sz.height);
@@ -887,10 +926,6 @@ static id SelectHighestRepresentation(NSArray *representations) {
 
         BOOL is1080 = (!is1440 && (minDim >= 960.0f || maxDim >= 1700.0f || pixels >= 1600000ULL ||
                        (repId && [repId containsString:@"1080"])));
-
-        if (capTo1080p && is1440) {
-            continue; // Skip 1440p on cellular in Mode 1
-        }
 
         if (is1440) {
             if (!rep1440p || bw > maxBw1440) {
@@ -914,7 +949,7 @@ static id SelectHighestRepresentation(NSArray *representations) {
         }
     }
 
-    id chosen = (!capTo1080p && rep1440p) ? rep1440p : (rep1080p ?: repHighest ?: representations.firstObject);
+    id chosen = rep1440p ?: (rep1080p ?: repHighest ?: representations.firstObject);
     return chosen;
 }
 
@@ -927,8 +962,7 @@ struct CxxVectorInt {
 
 static id (*orig_ABR_selectQualitySeqIndices)(id self, SEL _cmd, NSArray *representations, struct CxxVectorInt seqIndices, double bandwidth) = NULL;
 static id Hook_ABR_SelectQualitySeqIndices(id self, SEL _cmd, NSArray *representations, struct CxxVectorInt seqIndices, double bandwidth) {
-    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
-    if (mode != InstagramDash1440pModeDisabled && representations && [representations isKindOfClass:[NSArray class]] && representations.count > 0) {
+    if (InstagramDash1440p_IsForce1440pActive() && representations && [representations isKindOfClass:[NSArray class]] && representations.count > 0) {
         id chosen = SelectHighestRepresentation(representations);
         if (chosen) {
             return chosen;
@@ -942,8 +976,7 @@ static id Hook_ABR_SelectQualitySeqIndices(id self, SEL _cmd, NSArray *represent
 
 static id (*orig_ABR_selectQualityWithBw)(id self, SEL _cmd, NSArray *representations, double bandwidth) = NULL;
 static id Hook_ABR_SelectQualityFromReps(id self, SEL _cmd, NSArray *representations, double bandwidth) {
-    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
-    if (mode != InstagramDash1440pModeDisabled && representations && [representations isKindOfClass:[NSArray class]] && representations.count > 0) {
+    if (InstagramDash1440p_IsForce1440pActive() && representations && [representations isKindOfClass:[NSArray class]] && representations.count > 0) {
         id chosen = SelectHighestRepresentation(representations);
         if (chosen) {
             return chosen;
@@ -966,8 +999,7 @@ static BOOL Hook_ReturnYES(id self, SEL _cmd) {
 // FNFDashPlaylist Hook: Ensure video startup default representation is strictly 1440p (or 1080p fallback)
 static id (*orig_playlist_defaultRepresentationForTrack)(id self, SEL _cmd, NSInteger track) = NULL;
 static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteger track) {
-    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
-    if (track == 1 && mode != InstagramDash1440pModeDisabled) {
+    if (track == 1 && InstagramDash1440p_IsForce1440pActive()) {
         NSArray *reps = nil;
         if ([self respondsToSelector:@selector(representationsForTrack:)]) {
             reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(representationsForTrack:), 1);
@@ -988,8 +1020,7 @@ static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteg
 // FNFDashVideoPlayerMetadata Hooks: Force 1440x2560 Viewport & Screen Dimensions
 static CGSize (*orig_meta_size)(id self, SEL _cmd) = NULL;
 static CGSize Hook_Return1440pSize(id self, SEL _cmd) {
-    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
-    if (mode == InstagramDash1440pModeDisabled && orig_meta_size) {
+    if (!InstagramDash1440p_IsForce1440pActive() && orig_meta_size) {
         return orig_meta_size(self, _cmd);
     }
     return CGSizeMake(1440.0f, 2560.0f);
@@ -997,8 +1028,7 @@ static CGSize Hook_Return1440pSize(id self, SEL _cmd) {
 
 static CGSize (*orig_meta_screenSize)(id self, SEL _cmd) = NULL;
 static CGSize Hook_Return1440pScreenSize(id self, SEL _cmd) {
-    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
-    if (mode == InstagramDash1440pModeDisabled && orig_meta_screenSize) {
+    if (!InstagramDash1440p_IsForce1440pActive() && orig_meta_screenSize) {
         return orig_meta_screenSize(self, _cmd);
     }
     return CGSizeMake(1440.0f, 2560.0f);
@@ -1006,8 +1036,7 @@ static CGSize Hook_Return1440pScreenSize(id self, SEL _cmd) {
 
 static CGSize (*orig_meta_viewPortSize)(id self, SEL _cmd) = NULL;
 static CGSize Hook_Return1440pViewPortSize(id self, SEL _cmd) {
-    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
-    if (mode == InstagramDash1440pModeDisabled && orig_meta_viewPortSize) {
+    if (!InstagramDash1440p_IsForce1440pActive() && orig_meta_viewPortSize) {
         return orig_meta_viewPortSize(self, _cmd);
     }
     return CGSizeMake(1440.0f, 2560.0f);
@@ -1015,8 +1044,7 @@ static CGSize Hook_Return1440pViewPortSize(id self, SEL _cmd) {
 
 // Bandwidth Providers Hook: Boost to 100 Mbps
 static double Hook_ReturnHighBandwidth(id self, SEL _cmd) {
-    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
-    if (mode == InstagramDash1440pModeDisabled) {
+    if (!InstagramDash1440p_IsForce1440pActive()) {
         return 5000000.0;
     }
     return 100000000.0; // 100 Mbps

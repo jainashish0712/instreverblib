@@ -23,6 +23,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setBadgesHidden:(BOOL)hidden;
 - (void)toggleBadgesHidden;
 
+// Force 1440p on-demand trigger
+- (void)forceCheckAndFetch1440p;
+
 @end
 
 NS_ASSUME_NONNULL_END

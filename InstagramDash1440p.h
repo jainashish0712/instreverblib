@@ -13,13 +13,26 @@ extern "C" {
 
 // Streaming Modes
 typedef NS_ENUM(NSInteger, InstagramDash1440pMode) {
-    InstagramDash1440pModeWifiOnly = 0,     // Mode 1: Wi-Fi only 1440p (cellular capped to 1080p)
-    InstagramDash1440pModeAlways1440p = 1,  // Mode 2: Wi-Fi and Cellular both max cap to 1440p
-    InstagramDash1440pModeDisabled = 2       // Mode 3: Disable completely (Instagram default behavior)
+    InstagramDash1440pModeWifiOnly = 0,     // Legacy compatibility
+    InstagramDash1440pModeAlways1440p = 1,  // Force 1440p Active
+    InstagramDash1440pModeDisabled = 2       // Disabled: Native Instagram ABR & Playback
+};
+
+// Force Check and Fetch 1440p
+typedef NS_ENUM(NSInteger, InstagramDash1440pCheckResult) {
+    InstagramDash1440pCheckResultDisabled = 0,             // Toggled off; native Instagram behavior
+    InstagramDash1440pCheckResult1440pFoundAndForced = 1,  // 1440p stream detected and forced
+    InstagramDash1440pCheckResult1440pNotAvailable = 2,    // Reel does not have a 1440p stream on CDN (max 1080p)
+    InstagramDash1440pCheckResultArmed = 3                 // Armed to force 1440p on next playing reel
 };
 
 // Master initialization
 void InstagramDash1440p_Init(void);
+
+// On-Demand Force Check & Fetch
+InstagramDash1440pCheckResult InstagramDash1440p_ForceCheckAndFetch1440p(void);
+BOOL InstagramDash1440p_IsForce1440pActive(void);
+void InstagramDash1440p_SetForce1440pActive(BOOL active);
 
 // Mode & State Management
 InstagramDash1440pMode InstagramDash1440p_GetMode(void);

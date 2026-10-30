@@ -19,7 +19,7 @@ def verify_mini_hud():
 
     # 2. Verify Half-Screen Width Formula
     assert "CGFloat hudW = roundf(screenW * 0.50f);" in code, "HUD width must be strictly 50% of screen width!"
-    assert "CGFloat hudH = 220.0f;" in code, "HUD height must be compact 220pt!"
+    assert "CGFloat hudH = 245.0f;" in code, "HUD height must accommodate 3 buttons (245pt)!"
     assert "CGFloat hudX = screenW - hudW - rightMargin;" in code, "HUD must be docked to the right edge!"
     print("   [2/6] PASS: HUD width is strictly half-screen (50%) and docked to bottom-right corner.")
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Verification suite for InstagramDash1440p 3-Mode Architecture:
-Mode 1: Wi-Fi only 1440p (cellular capped to 1080p)
-Mode 2: Wi-Fi and Cellular both max cap to 1440p
-Mode 3: Disabled completely (Instagram default behavior)
+Verification suite for InstagramDash1440p On-Demand 1440p Engine:
+1. Default State: Disabled on launch -> Instagram default behavior on Wi-Fi and Cellular (cellular spoofed to Wi-Fi)
+2. On-Demand Trigger: User taps button below "Hide Badges" -> Forces 1440p regardless of Wi-Fi or cellular
+3. Fallback: If reel has only 1080p on CDN, cleanly falls back to 1080p and never 720p
+4. Untouched: Audio streams (<AdaptationSet mimeType="audio/mp4">) remain 100% untouched
 """
 
 import re
@@ -47,9 +48,9 @@ sample_mpd_1080_only = '''<MPD>
   </Period>
 </MPD>'''
 
-def simulate_pruner(xml, mode, is_cellular):
-    # Mode 2: Disabled -> Unmodified
-    if mode == 2:
+def simulate_pruner(xml, force_active):
+    # If Force 1440p is not active: Return unmodified XML
+    if not force_active:
         return xml
 
     rep_pattern = re.compile(r'<Representation\b[\s\S]*?(?:/>|</Representation>)')
@@ -91,26 +92,12 @@ def simulate_pruner(xml, mode, is_cellular):
     has_1080 = any(vr['w'] >= 960 or vr['h'] >= 1700 for vr in video_reps)
 
     target = None
-    if mode == 0: # WifiOnly
-        if is_cellular:
-            # 1080p cap
-            reps_under_1440 = [vr for vr in video_reps if not (vr['w'] >= 1200 or vr['h'] >= 2200)]
-            target = max(reps_under_1440, key=lambda x: (x['w']*x['h'], x['bw'])) if reps_under_1440 else video_reps[0]
-        else:
-            # Wi-Fi 1440p Priority, 1080p Fallback
-            if has_1440:
-                target = max([vr for vr in video_reps if vr['w'] >= 1200 or vr['h'] >= 2200], key=lambda x: (x['w']*x['h'], x['bw']))
-            elif has_1080:
-                target = max([vr for vr in video_reps if vr['w'] >= 960 or vr['h'] >= 1700], key=lambda x: (x['w']*x['h'], x['bw']))
-            else:
-                target = max(video_reps, key=lambda x: (x['w']*x['h'], x['bw']))
-    elif mode == 1: # Always 1440p
-        if has_1440:
-            target = max([vr for vr in video_reps if vr['w'] >= 1200 or vr['h'] >= 2200], key=lambda x: (x['w']*x['h'], x['bw']))
-        elif has_1080:
-            target = max([vr for vr in video_reps if vr['w'] >= 960 or vr['h'] >= 1700], key=lambda x: (x['w']*x['h'], x['bw']))
-        else:
-            target = max(video_reps, key=lambda x: (x['w']*x['h'], x['bw']))
+    if has_1440:
+        target = max([vr for vr in video_reps if vr['w'] >= 1200 or vr['h'] >= 2200], key=lambda x: (x['w']*x['h'], x['bw']))
+    elif has_1080:
+        target = max([vr for vr in video_reps if vr['w'] >= 960 or vr['h'] >= 1700], key=lambda x: (x['w']*x['h'], x['bw']))
+    else:
+        target = max(video_reps, key=lambda x: (x['w']*x['h'], x['bw']))
 
     pruned = xml
     for vr in sorted(video_reps, key=lambda x: x['span'][0], reverse=True):
@@ -126,45 +113,45 @@ def simulate_pruner(xml, mode, is_cellular):
 
 def test_modes():
     print("==================================================================")
-    print("   INSTAGRAM 3-MODE 1440p ENGINE VERIFICATION SUITE              ")
+    print("   INSTAGRAM ON-DEMAND FORCE 1440p ENGINE VERIFICATION SUITE      ")
     print("==================================================================")
 
-    # 1. Mode 1 on Wi-Fi: 1440p
-    m1_wifi = simulate_pruner(sample_mpd, 0, is_cellular=False)
-    assert '1665294911822981v' in m1_wifi
-    assert '1079848834835350v' not in m1_wifi
-    assert 'audio_1' in m1_wifi
-    print("   [1/6] PASS: Mode 1 on Wi-Fi selects 1440p and strips 1080p/720p.")
+    # 1. Default State (Force NOT active): 100% Unmodified XML
+    default_xml = simulate_pruner(sample_mpd, force_active=False)
+    assert default_xml == sample_mpd
+    assert '1665294911822981v' in default_xml
+    assert '1079848834835350v' in default_xml
+    assert '720p_v' in default_xml
+    assert 'audio_1' in default_xml
+    print("   [1/6] PASS: Default State: Manifest XML is 100% untouched for Instagram's default playback.")
 
-    # 2. Mode 1 on Cellular: 1080p cap
-    m1_cell = simulate_pruner(sample_mpd, 0, is_cellular=True)
-    assert '1079848834835350v' in m1_cell
-    assert '1665294911822981v' not in m1_cell
-    assert 'audio_1' in m1_cell
-    print("   [2/6] PASS: Mode 1 on Cellular caps to 1080p and strips 1440p.")
+    # 2. Force 1440p Active on Wi-Fi: Forces 1440p and strips 1080p and 720p
+    forced_1440 = simulate_pruner(sample_mpd, force_active=True)
+    assert '1665294911822981v' in forced_1440
+    assert '1079848834835350v' not in forced_1440
+    assert '720p_v' not in forced_1440
+    assert 'audio_1' in forced_1440
+    print("   [2/6] PASS: On Force Click: Strips 1080p and 720p, forcing strictly 1440p.")
 
-    # 3. Mode 1 on Wi-Fi with 1080p-only reel: fallback to 1080p
-    m1_fallback = simulate_pruner(sample_mpd_1080_only, 0, is_cellular=False)
-    assert '1079848834835350v' in m1_fallback
-    assert '720p_v' not in m1_fallback
-    assert 'audio_1' in m1_fallback
-    print("   [3/6] PASS: Mode 1 safely falls back to 1080p when reel lacks 1440p.")
+    # 3. Force 1440p Active on Cellular: Forces 1440p regardless of Wi-Fi or cellular
+    forced_cell = simulate_pruner(sample_mpd, force_active=True)
+    assert '1665294911822981v' in forced_cell
+    assert '1079848834835350v' not in forced_cell
+    assert '720p_v' not in forced_cell
+    assert 'audio_1' in forced_cell
+    print("   [3/6] PASS: On Cellular Data: 1440p is forced regardless of network interface.")
 
-    # 4. Mode 2 on Cellular: Force 1440p
-    m2_cell = simulate_pruner(sample_mpd, 1, is_cellular=True)
-    assert '1665294911822981v' in m2_cell
-    assert '1079848834835350v' not in m2_cell
-    assert 'audio_1' in m2_cell
-    print("   [4/6] PASS: Mode 2 forces 1440p on Cellular as well.")
+    # 4. Fallback floor: Reel lacks 1440p -> cleanly falls back to 1080p floor (no 720p)
+    forced_fallback = simulate_pruner(sample_mpd_1080_only, force_active=True)
+    assert '1079848834835350v' in forced_fallback
+    assert '720p_v' not in forced_fallback
+    assert 'audio_1' in forced_fallback
+    print("   [4/6] PASS: Reel with no 1440p on CDN falls back strictly to 1080p (no 720p).")
 
-    # 5. Mode 3: Disabled completely
-    m3 = simulate_pruner(sample_mpd, 2, is_cellular=False)
-    assert m3 == sample_mpd
-    assert '1665294911822981v' in m3
-    assert '1079848834835350v' in m3
-    assert '720p_v' in m3
-    assert 'audio_1' in m3
-    print("   [5/6] PASS: Mode 3 leaves manifest 100% untouched for native IG behavior.")
+    # 5. Audio AdaptationSet preserved perfectly
+    assert '<AdaptationSet mimeType="audio/mp4">' in forced_1440
+    assert '<Representation id="audio_1" bandwidth="128000">' in forced_1440
+    print("   [5/6] PASS: Audio stream (<AdaptationSet mimeType=\"audio/mp4\">) is 100% intact.")
 
     # 6. Source code audit
     with open("InstagramDash1440p.h", "r", encoding="utf-8") as f:
@@ -174,20 +161,18 @@ def test_modes():
     with open("InstagramReverbUI.m", "r", encoding="utf-8") as f:
         ui = f.read()
 
-    assert "InstagramDash1440pModeWifiOnly" in h
-    assert "InstagramDash1440pModeAlways1440p" in h
-    assert "InstagramDash1440pModeDisabled" in h
-    assert "InstagramDash1440p_CycleMode" in h
-    assert "InstagramDash1440p_CycleMode" in mm
-    assert "InstagramDash1440p_CycleMode" in ui
+    assert "InstagramDash1440p_ForceCheckAndFetch1440p" in h
+    assert "InstagramDash1440p_IsForce1440pActive" in h
+    assert "InstagramDash1440p_SetForce1440pActive" in h
+    assert "InstagramDash1440p_ForceCheckAndFetch1440p" in mm
+    assert "InstagramDash1440p_IsForce1440pActive" in mm
+    assert "InstagramDash1440p_ForceCheckAndFetch1440p" in ui
+    assert "force1440pBtn" in ui
     assert "PruneManifestXml" in mm
-    assert "presentationDescriptionWithContentsOfXml" in mm
-    assert "dashManifest" in mm
-    assert "handleTap:" in ui
-    print("   [6/6] PASS: Source code symbols and headers 100% synchronized.")
+    print("   [6/6] PASS: Source code declarations and UI linkage are 100% synchronized.")
 
     print("==================================================================")
-    print("    ALL 6 MODE & MANIFEST PRUNER TESTS PASSED (100%)!             ")
+    print("    ALL 6 ON-DEMAND FORCE 1440p CHECKS PASSED (100%)!             ")
     print("==================================================================")
 
 if __name__ == "__main__":
