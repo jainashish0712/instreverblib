@@ -67,6 +67,17 @@ InstagramDash1440pCheckResult InstagramDash1440p_ForceCheckAndFetch1440p(void) {
     if (active) {
         // Toggle OFF -> Return to Instagram default behavior
         InstagramDash1440p_SetForce1440pActive(NO);
+        pthread_mutex_lock(&g_playerMutex);
+        id player = g_activePlayingPlayer;
+        pthread_mutex_unlock(&g_playerMutex);
+        if (player) {
+            SEL selQ = sel_registerName("selectQuality");
+            if ([player respondsToSelector:selQ]) {
+                @try {
+                    ((void (*)(id, SEL))objc_msgSend)(player, selQ);
+                } @catch (...) {}
+            }
+        }
         return InstagramDash1440pCheckResultDisabled;
     }
 
@@ -284,13 +295,18 @@ static BOOL IsAudioRepresentation(id rep) {
     if ([actual respondsToSelector:@selector(isAudio)]) {
         if (((BOOL (*)(id, SEL))objc_msgSend)(actual, @selector(isAudio))) return YES;
     }
+    if ([actual respondsToSelector:@selector(isVideo)]) {
+        if (((BOOL (*)(id, SEL))objc_msgSend)(actual, @selector(isVideo))) return NO;
+    }
     if ([actual respondsToSelector:@selector(track)]) {
         NSInteger tr = ((NSInteger (*)(id, SEL))objc_msgSend)(actual, @selector(track));
-        if (tr == 1) return YES;
+        if (tr == 2) return YES;
+        if (tr == 1) return NO; // Track 1 is Video
     }
     if ([actual respondsToSelector:@selector(representationId)]) {
         NSString *repId = ((NSString *(*)(id, SEL))objc_msgSend)(actual, @selector(representationId));
         if (repId && [repId hasSuffix:@"a"]) return YES;
+        if (repId && [repId hasSuffix:@"v"]) return NO;
     }
     return NO;
 }
