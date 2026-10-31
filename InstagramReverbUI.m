@@ -1068,7 +1068,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     } else if (res == InstagramDash1440pCheckResultArmed) {
         UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
         [fb impactOccurred];
-        [_force1440pBtn setTitle:@"1440p Armed (Next Reel)" forState:UIControlStateNormal];
+        [_force1440pBtn setTitle:@"1440p Armed (Fetching...)" forState:UIControlStateNormal];
         [_force1440pBtn setTitleColor:[UIColor colorWithRed:0.0f green:0.9f blue:1.0f alpha:1.0f] forState:UIControlStateNormal];
     } else { // Disabled / Reset
         UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -1177,7 +1177,6 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
 - (void)updateAppearance {
     BOOL isForced = InstagramDash1440p_IsForce1440pActive();
-    NSString *quality = InstagramDash1440p_GetCurrentQuality() ?: @"1440p";
     NSString *repId = InstagramDash1440p_GetCurrentRepresentationId() ?: @"ready";
 
     NSString *text = nil;
@@ -1187,7 +1186,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         self.statusDot.backgroundColor = [UIColor colorWithWhite:0.6f alpha:0.8f];
         self.titleLabel.textColor = [UIColor colorWithWhite:0.75f alpha:1.0f];
     } else {
-        text = [NSString stringWithFormat:@"Forced [%@]: %@", quality, repId];
+        text = [NSString stringWithFormat:@"Forced [1440p]: %@", repId];
         self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.95f].CGColor;
         self.statusDot.backgroundColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
         self.titleLabel.textColor = [UIColor whiteColor];
