@@ -1,4 +1,4 @@
-name: Build InstagramReverb Dylib
+name: Build InstagramReverb & InstagramDash1440p Dylibs
 
 on:
   push:
@@ -18,14 +18,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compile InstagramReverb.dylib
+      - name: Compile Both Dylibs
         run: |
           chmod +x build.sh
           ./build.sh
-          ls -lh InstagramReverb.dylib
           file InstagramReverb.dylib
+          file InstagramDash1440p.dylib
+          file Instagram1440p.dylib
 
-      - name: Release Dylib (After Build Action Complete)
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tweaks
+          path: |
+            InstagramReverb.dylib
+            InstagramDash1440p.dylib
+            Instagram1440p.dylib
+
+      - name: Release Dylibs (After Build Action Complete)
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -46,8 +56,11 @@ jobs:
           # Delete pre-existing release with this tag if re-run
           gh release delete "$BUILD_TAG" --yes || true
           
-          # Create GitHub Release with direct raw uncompressed dylib
-          gh release create "$BUILD_TAG" InstagramReverb.dylib \
-            --title "InstagramReverb Build #${{ github.run_number }}" \
-            --notes "Continuous build of InstagramReverb.dylib (commit ${{ github.sha }}). Direct uncompressed binary for LiveContainer, TrollStore, or Sideloading." \
+          # Create GitHub Release with both raw uncompressed dylibs
+          gh release create "$BUILD_TAG" \
+            InstagramReverb.dylib \
+            InstagramDash1440p.dylib \
+            Instagram1440p.dylib \
+            --title "Instagram Tweaks Build #${{ github.run_number }}" \
+            --notes "Continuous build containing two separate dylibs: 1) InstagramReverb.dylib (Audio DSP: Reverb, Room, Pitch) and 2) InstagramDash1440p.dylib (Ultra HD 1440p VP9 DASH Video Engine). Direct uncompressed binaries for LiveContainer, TrollStore, or Sideloading." \
             --latest

@@ -17,11 +17,13 @@ def verify_mini_hud():
     assert "CreateCompactThumb(11.0f)" in code, "Thumb size must be 11.0f!"
     print("   [1/6] PASS: Slider thumb diameter set to compact 11pt.")
 
-    # 2. Verify Half-Screen Width Formula
+    # 2. Verify Half-Screen Width & Dynamic Beside-Button Positioning
     assert "CGFloat hudW = roundf(screenW * 0.50f);" in code, "HUD width must be strictly 50% of screen width!"
-    assert "CGFloat hudH = 245.0f;" in code, "HUD height must accommodate 3 buttons (245pt)!"
-    assert "CGFloat hudX = screenW - hudW - rightMargin;" in code, "HUD must be docked to the right edge!"
-    print("   [2/6] PASS: HUD width is strictly half-screen (50%) and docked to bottom-right corner.")
+    assert "CGFloat hudH = 222.0f;" in code, "HUD height for 2 buttons (222pt)!"
+    assert "CGRectGetMidX(btnFrame) < screenW / 2.0f" in code, "HUD must detect left/right button placement!"
+    assert "hudX = CGRectGetMaxX(btnFrame) + 8.0f;" in code, "If left, open right/inside!"
+    assert "hudX = CGRectGetMinX(btnFrame) - hudW - 8.0f;" in code, "If right, open left/inside!"
+    print("   [2/6] PASS: Dynamic beside-button placement verified (opens right/inside if on left, left/inside if on right).")
 
     # 3. Verify Both UIControlStateNormal & UIControlStateHighlighted are Set
     sliders = ["_pitchSlider", "_mixSlider", "_roomSlider", "_volumeView"]

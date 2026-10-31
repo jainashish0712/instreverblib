@@ -32,8 +32,6 @@
 #import <fcntl.h>
 #import <time.h>
 #import "InstagramReverb.h"
-#import "InstagramWifiSpoofer.h"
-#import "InstagramDash1440p.h"
 #import "fishhook.h"
 
 #ifdef __LP64__
@@ -1133,9 +1131,9 @@ float InstagramReverb_GetRoomSize(void) {
 }
 
 void InstagramReverb_ResetDefaults(void) {
-    InstagramReverb_SetPitch(0.0f);
-    InstagramReverb_SetRoomSize(0.82f);
-    InstagramReverb_SetWetDry(0.35f, 0.65f);
+    InstagramReverb_SetPitch(-0.4f);
+    InstagramReverb_SetRoomSize(0.65f);
+    InstagramReverb_SetWetDry(0.42f, 0.58f);
     InstagramReverb_SetEnabled(true);
 }
 
@@ -1187,27 +1185,24 @@ static void InstagramReverbInit(void) {
         g_dsp.allpassR[i].bufSize = kAllpassLengthsR[i];
     }
 
-    g_dsp.roomSize = 0.82f;
+    g_dsp.roomSize = 0.65f;
     g_dsp.damping = 0.25f;
-    g_dsp.wet = 0.35f;
-    g_dsp.dry = 0.65f;
-    g_dsp.targetRoomSize = 0.82f;
-    g_dsp.targetWet = 0.35f;
-    g_dsp.targetDry = 0.65f;
+    g_dsp.wet = 0.42f;
+    g_dsp.dry = 0.58f;
+    g_dsp.targetRoomSize = 0.65f;
+    g_dsp.targetWet = 0.42f;
+    g_dsp.targetDry = 0.58f;
 
-    g_dsp.semitones = 0.0f;
-    g_dsp.targetSemitones = 0.0f;
-    g_dsp.pitchRatio = 1.0f;
-    g_dsp.targetPitchRatio = 1.0f;
+    g_dsp.semitones = -0.4f;
+    g_dsp.targetSemitones = -0.4f;
+    g_dsp.pitchRatio = powf(2.0f, -0.4f / 12.0f);
+    g_dsp.targetPitchRatio = g_dsp.pitchRatio;
     g_dsp.pitchPhase = 0.0f;
     g_dsp.pitchWriteIdx = 0;
     g_dsp.enabled = true;
 
     // 4. Install all interception hooks across all 5 tiers
     InstallAllInterceptionHooks();
-
-    // 5. Initialize Automatic Wi-Fi Spoofing Engine (forces 1080p Reels streaming)
-    InstagramWifiSpoofer_Init();
 
     // IGLog("InstagramReverb Engine Initialized Successfully!");
     // IGLog("==================================================================");

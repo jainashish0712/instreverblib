@@ -185,7 +185,6 @@ def test_system_and_dsp_isolation():
     # Reverb audio processing functions intact
     assert "ProcessAudioBufferList" in dsp_code
     assert "SoftClip" in dsp_code
-    assert "InstagramWifiSpoofer_Init();" in dsp_code
 
     # Volume bar intact
     assert "InstagramReverbVolumeBar" in ui_code

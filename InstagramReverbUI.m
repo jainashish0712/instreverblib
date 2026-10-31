@@ -17,8 +17,6 @@
 #import <dlfcn.h>
 #import "InstagramReverbUI.h"
 #import "InstagramReverb.h"
-#import "InstagramDash1440p.h"
-#import "InstagramWifiSpoofer.h"
 
 // Accent Color: Vibrant Neon Green #1DB954 for maximum visibility and contrast
 #define ACCENT_COLOR [UIColor colorWithRed:(29.0f/255.0f) green:(185.0f/255.0f) blue:(84.0f/255.0f) alpha:1.0f]
@@ -253,45 +251,33 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 }
 
 - (void)updateFillForVolume:(float)volume {
-    volume = fmaxf(0.0f, fminf(1.0f, volume));
-    CGFloat h = self.bounds.size.height;
-    CGFloat w = self.bounds.size.width;
-    CGFloat fillH = roundf(h * volume);
-    CGFloat fillY = h - fillH;
-    self.fillView.frame = CGRectMake(0, fillY, w, fillH);
+    float clamped = fmaxf(0.0f, fminf(1.0f, volume));
+    CGFloat totalH = self.bounds.size.height;
+    CGFloat fillH = totalH * clamped;
+    CGFloat fillY = totalH - fillH;
+    _fillView.frame = CGRectMake(0, fillY, self.bounds.size.width, fillH);
 }
 
 - (void)setSystemVolume:(float)volume {
-    volume = fmaxf(0.0f, fminf(1.0f, volume));
-    [self updateFillForVolume:volume];
-
-    for (UIView *sub in self.internalVolumeView.subviews) {
+    float clamped = fmaxf(0.0f, fminf(1.0f, volume));
+    for (UIView *sub in _internalVolumeView.subviews) {
         if ([sub isKindOfClass:[UISlider class]]) {
             UISlider *slider = (UISlider *)sub;
-            slider.value = volume;
-            [slider sendActionsForControlEvents:UIControlEventValueChanged];
+            [slider setValue:clamped animated:NO];
+            [slider sendActionsForControlEvents:UIControlEventTouchUpInside];
             break;
         }
     }
+    [self updateFillForVolume:clamped];
 }
 
 - (void)revealAndResetTimer {
-    [self.inactivityTimer invalidate];
-    self.inactivityTimer = nil;
-
-    if (self.alpha < 1.0f) {
-        [UIView animateWithDuration:0.20 animations:^{
-            self.alpha = 1.0f;
-        }];
-    }
-
+    [_inactivityTimer invalidate];
+    self.alpha = 1.0f;
     __weak typeof(self) weakSelf = self;
-    self.inactivityTimer = [NSTimer timerWithTimeInterval:2.5
-                                                   target:weakSelf
-                                                 selector:@selector(fadeToTransparent)
-                                                 userInfo:nil
-                                                  repeats:NO];
-    [[NSRunLoop mainRunLoop] addTimer:self.inactivityTimer forMode:NSRunLoopCommonModes];
+    _inactivityTimer = [NSTimer scheduledTimerWithTimeInterval:2.5 repeats:NO block:^(NSTimer * _Nonnull timer) {
+        [weakSelf fadeToTransparent];
+    }];
 }
 
 - (void)fadeToTransparent {
@@ -300,141 +286,19 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     }];
 }
 
-- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [super touchesBegan:touches withEvent:event];
-
-    UITouch *touch = [touches anyObject];
-    if (!touch) return;
-
-    // Wake up bar to 100% opacity on touch; pause inactivity timer while touching
-    [self.inactivityTimer invalidate];
-    self.inactivityTimer = nil;
-    if (self.alpha < 1.0f) {
-        [UIView animateWithDuration:0.15 animations:^{
-            self.alpha = 1.0f;
-        }];
+- (void)systemVolumeNotification:(NSNotification *)note {
+    NSDictionary *userInfo = note.userInfo;
+    if (userInfo && userInfo[@"AVSystemController_AudioVolumeNotificationParameter"]) {
+        float vol = [userInfo[@"AVSystemController_AudioVolumeNotificationParameter"] floatValue];
+        [self updateFillForVolume:vol];
+        [self revealAndResetTimer];
     }
-
-    // Record initial touch state (NO volume change on touch!)
-    self.touchDownPoint = [touch locationInView:self];
-    self.touchDownVolume = [self currentSystemVolume];
-    self.isSwipingVolume = NO;
-    self.isDraggingBar = NO;
-
-    // Start strict 4.0-second hold timer to unlock dragging anywhere
-    [self.holdTimer invalidate];
-    __weak typeof(self) weakSelf = self;
-    self.holdTimer = [NSTimer timerWithTimeInterval:1.5
-                                             target:weakSelf
-                                           selector:@selector(handleHoldUnlocked)
-                                           userInfo:nil
-                                            repeats:NO];
-    [[NSRunLoop mainRunLoop] addTimer:self.holdTimer forMode:NSRunLoopCommonModes];
-}
-
-- (void)handleHoldUnlocked {
-    self.isDraggingBar = YES;
-    self.isSwipingVolume = NO;
-
-    if (@available(iOS 10.0, *)) {
-        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
-        [feedback impactOccurred];
-    }
-
-    [UIView animateWithDuration:0.2 animations:^{
-        self.transform = CGAffineTransformMakeScale(1.18f, 1.18f);
-        self.layer.borderColor = [UIColor whiteColor].CGColor;
-    }];
-}
-
-- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [super touchesMoved:touches withEvent:event];
-
-    UITouch *touch = [touches anyObject];
-    if (!touch) return;
-
-    UIView *superview = self.superview;
-    if (!superview) return;
-
-    // 1. If 4-second hold unlocked, drag the bar anywhere across the screen
-    if (self.isDraggingBar) {
-        CGPoint pt = [touch locationInView:superview];
-        CGRect bounds = superview.bounds;
-        CGFloat halfW = self.bounds.size.width / 2.0f;
-        CGFloat halfH = self.bounds.size.height / 2.0f;
-        CGFloat minX = halfW + 4.0f;
-        CGFloat maxX = bounds.size.width - halfW - 4.0f;
-        CGFloat minY = halfH + 40.0f;
-        CGFloat maxY = bounds.size.height - halfH - 20.0f;
-
-        pt.x = fmaxf(minX, fminf(maxX, pt.x));
-        pt.y = fmaxf(minY, fminf(maxY, pt.y));
-        self.center = pt;
-        return;
-    }
-
-    // 2. Otherwise check for intentional vertical swipe to change volume
-    CGPoint currentPoint = [touch locationInView:self];
-    CGFloat deltaY = self.touchDownPoint.y - currentPoint.y; // Upwards swipe increases volume
-
-    if (!self.isSwipingVolume) {
-        if (fabs(deltaY) >= 5.0f) {
-            self.isSwipingVolume = YES;
-            // Cancel hold timer since user is actively swiping volume
-            [self.holdTimer invalidate];
-            self.holdTimer = nil;
-        }
-    }
-
-    if (self.isSwipingVolume) {
-        // Swiping changes volume only while actively swiping; bar position stays fixed
-        float newVol = self.touchDownVolume + (float)(deltaY / self.bounds.size.height);
-        newVol = fmaxf(0.0f, fminf(1.0f, newVol));
-        [self setSystemVolume:newVol];
-    }
-}
-
-- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [super touchesEnded:touches withEvent:event];
-
-    [self.holdTimer invalidate];
-    self.holdTimer = nil;
-
-    if (self.isDraggingBar) {
-        self.isDraggingBar = NO;
-        [UIView animateWithDuration:0.2 animations:^{
-            self.transform = CGAffineTransformIdentity;
-            self.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.25f].CGColor;
-        }];
-    }
-
-    self.isSwipingVolume = NO;
-    [self revealAndResetTimer];
-}
-
-- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [super touchesCancelled:touches withEvent:event];
-
-    [self.holdTimer invalidate];
-    self.holdTimer = nil;
-
-    if (self.isDraggingBar) {
-        self.isDraggingBar = NO;
-        [UIView animateWithDuration:0.2 animations:^{
-            self.transform = CGAffineTransformIdentity;
-            self.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.25f].CGColor;
-        }];
-    }
-
-    self.isSwipingVolume = NO;
-    [self revealAndResetTimer];
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
     if ([keyPath isEqualToString:@"outputVolume"]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            float vol = [[AVAudioSession sharedInstance] outputVolume];
-            [self updateFillForVolume:vol];
+            [self updateFillForVolume:[self currentSystemVolume]];
             [self revealAndResetTimer];
         });
     } else {
@@ -442,16 +306,60 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     }
 }
 
-- (void)systemVolumeNotification:(NSNotification *)note {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        float vol = [[AVAudioSession sharedInstance] outputVolume];
-        NSDictionary *userInfo = note.userInfo;
-        if (userInfo && userInfo[@"AVSystemController_AudioVolumeNotificationParameter"]) {
-            vol = [userInfo[@"AVSystemController_AudioVolumeNotificationParameter"] floatValue];
-        }
-        [self updateFillForVolume:vol];
-        [self revealAndResetTimer];
-    });
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    UITouch *t = [touches anyObject];
+    if (!t) return;
+
+    [self revealAndResetTimer];
+    self.touchDownPoint = [t locationInView:self.superview];
+    self.touchDownVolume = [self currentSystemVolume];
+    self.isSwipingVolume = NO;
+    self.isDraggingBar = NO;
+
+    [_holdTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    _holdTimer = [NSTimer scheduledTimerWithTimeInterval:4.0 repeats:NO block:^(NSTimer * _Nonnull timer) {
+        weakSelf.isDraggingBar = YES;
+        UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
+        [fb impactOccurred];
+    }];
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    UITouch *t = [touches anyObject];
+    if (!t) return;
+
+    [self revealAndResetTimer];
+    CGPoint pt = [t locationInView:self.superview];
+
+    if (self.isDraggingBar) {
+        // Drag entire bar anywhere on screen
+        self.center = pt;
+        return;
+    }
+
+    CGFloat deltaY = self.touchDownPoint.y - pt.y;
+    if (fabs(deltaY) > 4.0f) {
+        [_holdTimer invalidate];
+        self.isSwipingVolume = YES;
+        float volDelta = (float)(deltaY / self.bounds.size.height);
+        float newVol = fmaxf(0.0f, fminf(1.0f, self.touchDownVolume + volDelta));
+        [self setSystemVolume:newVol];
+    }
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [_holdTimer invalidate];
+    self.isDraggingBar = NO;
+    self.isSwipingVolume = NO;
+    [self revealAndResetTimer];
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [_holdTimer invalidate];
+    self.isDraggingBar = NO;
+    self.isSwipingVolume = NO;
+    [self revealAndResetTimer];
 }
 
 @end
@@ -502,8 +410,6 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 // 6. Hide / Show Badges Button (Below Reset to Defaults)
 @property (nonatomic, strong) UIButton *hideBadgesBtn;
 
-// 7. Force 1440p Button (Below Hide Badges)
-@property (nonatomic, strong) UIButton *force1440pBtn;
 @property (nonatomic, copy) void (^closeHandler)(void);
 
 - (void)refreshValues;
@@ -521,7 +427,6 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         self.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.18f].CGColor;
         self.backgroundColor = [UIColor colorWithWhite:0.08f alpha:0.62f];
 
-        // 50% blur intensity background effect
         UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
         _blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
         _blurView.frame = self.bounds;
@@ -535,18 +440,12 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         _contentContainer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [self addSubview:_contentContainer];
 
-        // Header: Scaled compact title + toggle + close
+        // Header: Title on left, X button centered after title, Switch on right
         _titleLabel = [[UILabel alloc] init];
         _titleLabel.text = @"Reverb & Pitch";
         _titleLabel.font = [UIFont boldSystemFontOfSize:11.5f];
         _titleLabel.textColor = [UIColor whiteColor];
         [_contentContainer addSubview:_titleLabel];
-
-        _enableSwitch = [[UISwitch alloc] init];
-        _enableSwitch.onTintColor = ACCENT_COLOR;
-        _enableSwitch.transform = CGAffineTransformMakeScale(0.58f, 0.58f);
-        [_enableSwitch addTarget:self action:@selector(enableToggled:) forControlEvents:UIControlEventValueChanged];
-        [_contentContainer addSubview:_enableSwitch];
 
         _closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
         [_closeBtn setTitle:@"✕" forState:UIControlStateNormal];
@@ -555,6 +454,12 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         [_closeBtn addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
         [_contentContainer addSubview:_closeBtn];
 
+        _enableSwitch = [[UISwitch alloc] init];
+        _enableSwitch.onTintColor = ACCENT_COLOR;
+        _enableSwitch.transform = CGAffineTransformMakeScale(0.58f, 0.58f);
+        [_enableSwitch addTarget:self action:@selector(enableToggled:) forControlEvents:UIControlEventValueChanged];
+        [_contentContainer addSubview:_enableSwitch];
+
         _separator = [[UIView alloc] init];
         _separator.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.12f];
         [_contentContainer addSubview:_separator];
@@ -562,7 +467,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         // Sleek compact 11pt slider thumbs
         UIImage *thumb = CreateCompactThumb(11.0f);
 
-        // 1. Pitch Shift Row (-4.0 to +4.0 in 0.2 intervals)
+        // 1. Pitch Shift Row (-4.0 to +4.0 in 0.2 intervals, default -0.4)
         _pitchTitleLabel = [[UILabel alloc] init];
         _pitchTitleLabel.text = @"Pitch";
         _pitchTitleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightMedium];
@@ -578,22 +483,23 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         [_contentContainer addSubview:_pitchPlusBtn];
 
         _pitchValLabel = [[UILabel alloc] init];
+        _pitchValLabel.text = @"-0.4 st";
+        _pitchValLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightBold];
+        _pitchValLabel.textColor = [UIColor colorWithWhite:0.90f alpha:1.0f];
         _pitchValLabel.textAlignment = NSTextAlignmentRight;
-        _pitchValLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightRegular];
-        _pitchValLabel.textColor = [UIColor colorWithWhite:0.85f alpha:1.0f];
         [_contentContainer addSubview:_pitchValLabel];
 
         _pitchSlider = [[UISlider alloc] init];
         _pitchSlider.minimumValue = -4.0f;
         _pitchSlider.maximumValue = 4.0f;
-        _pitchSlider.value = 0.0f;
+        _pitchSlider.value = -0.4f;
         _pitchSlider.minimumTrackTintColor = ACCENT_COLOR;
         [_pitchSlider setThumbImage:thumb forState:UIControlStateNormal];
         [_pitchSlider setThumbImage:thumb forState:UIControlStateHighlighted];
         [_pitchSlider addTarget:self action:@selector(pitchChanged:) forControlEvents:UIControlEventValueChanged];
         [_contentContainer addSubview:_pitchSlider];
 
-        // 2. Reverb Mix Row (0% to 100% in 8% intervals)
+        // 2. Reverb Mix Row (0% to 100% in 8% intervals, default 42% Wet)
         _mixTitleLabel = [[UILabel alloc] init];
         _mixTitleLabel.text = @"Reverb";
         _mixTitleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightMedium];
@@ -609,24 +515,23 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         [_contentContainer addSubview:_mixPlusBtn];
 
         _mixValLabel = [[UILabel alloc] init];
+        _mixValLabel.text = @"Dry 58% / Wet 42%";
+        _mixValLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightBold];
+        _mixValLabel.textColor = [UIColor colorWithWhite:0.90f alpha:1.0f];
         _mixValLabel.textAlignment = NSTextAlignmentRight;
-        _mixValLabel.font = [UIFont systemFontOfSize:9.0f weight:UIFontWeightRegular];
-        _mixValLabel.textColor = [UIColor colorWithWhite:0.85f alpha:1.0f];
-        _mixValLabel.adjustsFontSizeToFitWidth = YES;
-        _mixValLabel.minimumScaleFactor = 0.75f;
         [_contentContainer addSubview:_mixValLabel];
 
         _mixSlider = [[UISlider alloc] init];
         _mixSlider.minimumValue = 0.0f;
         _mixSlider.maximumValue = 1.0f;
-        _mixSlider.value = 0.35f;
+        _mixSlider.value = 0.42f;
         _mixSlider.minimumTrackTintColor = ACCENT_COLOR;
         [_mixSlider setThumbImage:thumb forState:UIControlStateNormal];
         [_mixSlider setThumbImage:thumb forState:UIControlStateHighlighted];
         [_mixSlider addTarget:self action:@selector(mixChanged:) forControlEvents:UIControlEventValueChanged];
         [_contentContainer addSubview:_mixSlider];
 
-        // 3. Room Size Row (0.10 to 0.98 in 0.08 intervals)
+        // 3. Room Size Row (0.10 to 0.98 in 0.08 intervals, default 0.65)
         _roomTitleLabel = [[UILabel alloc] init];
         _roomTitleLabel.text = @"Room";
         _roomTitleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightMedium];
@@ -642,15 +547,16 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         [_contentContainer addSubview:_roomPlusBtn];
 
         _roomValLabel = [[UILabel alloc] init];
+        _roomValLabel.text = @"0.65";
+        _roomValLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightBold];
+        _roomValLabel.textColor = [UIColor colorWithWhite:0.90f alpha:1.0f];
         _roomValLabel.textAlignment = NSTextAlignmentRight;
-        _roomValLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightRegular];
-        _roomValLabel.textColor = [UIColor colorWithWhite:0.85f alpha:1.0f];
         [_contentContainer addSubview:_roomValLabel];
 
         _roomSlider = [[UISlider alloc] init];
         _roomSlider.minimumValue = 0.1f;
         _roomSlider.maximumValue = 0.98f;
-        _roomSlider.value = 0.82f;
+        _roomSlider.value = 0.65f;
         _roomSlider.minimumTrackTintColor = ACCENT_COLOR;
         [_roomSlider setThumbImage:thumb forState:UIControlStateNormal];
         [_roomSlider setThumbImage:thumb forState:UIControlStateHighlighted];
@@ -673,17 +579,14 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         [_contentContainer addSubview:_volumePlusBtn];
 
         _volumeValLabel = [[UILabel alloc] init];
+        _volumeValLabel.text = @"50%";
+        _volumeValLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightBold];
+        _volumeValLabel.textColor = [UIColor colorWithWhite:0.90f alpha:1.0f];
         _volumeValLabel.textAlignment = NSTextAlignmentRight;
-        _volumeValLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightRegular];
-        _volumeValLabel.textColor = [UIColor colorWithWhite:0.85f alpha:1.0f];
         [_contentContainer addSubview:_volumeValLabel];
 
         _volumeView = [[MPVolumeView alloc] init];
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         _volumeView.showsRouteButton = NO;
-#pragma clang diagnostic pop
-        _volumeView.tintColor = ACCENT_COLOR;
         [_volumeView setVolumeThumbImage:thumb forState:UIControlStateNormal];
         [_volumeView setVolumeThumbImage:thumb forState:UIControlStateHighlighted];
         [_contentContainer addSubview:_volumeView];
@@ -708,35 +611,14 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         [_hideBadgesBtn addTarget:self action:@selector(toggleBadgesTapped) forControlEvents:UIControlEventTouchUpInside];
         [_contentContainer addSubview:_hideBadgesBtn];
 
-        // 7. Force 1440p Button (Below Hide Badges)
-        _force1440pBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        [_force1440pBtn setTitle:@"Force 1440p" forState:UIControlStateNormal];
-        [_force1440pBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
-        _force1440pBtn.titleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightMedium];
-        _force1440pBtn.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.07f];
-        _force1440pBtn.layer.cornerRadius = 5.0f;
-        [_force1440pBtn addTarget:self action:@selector(force1440pTapped) forControlEvents:UIControlEventTouchUpInside];
-        [_contentContainer addSubview:_force1440pBtn];
-
         // Draggable Pan Gesture for HUD (without interfering with sliders or buttons)
         UIPanGestureRecognizer *hudPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         hudPan.delegate = self;
         [self addGestureRecognizer:hudPan];
 
-        [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(onDashStateChanged:)
-                                                     name:kInstagramDash1440pStateDidChangeNotification
-                                                   object:nil];
-
         [self refreshValues];
     }
     return self;
-}
-
-- (void)onDashStateChanged:(NSNotification *)note {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self refreshValues];
-    });
 }
 
 - (void)dealloc {
@@ -788,11 +670,22 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     CGFloat pad = 10.0f;
     CGFloat w = self.bounds.size.width - (pad * 2.0f);
 
-    // Header (y = 6.0f)
+    // Header (y = 6.0f): Title on left, X button centered after title, Switch on right
     CGFloat y = 6.0f;
-    _titleLabel.frame = CGRectMake(pad, y, w - 55.0f, 18.0f);
-    _enableSwitch.center = CGPointMake(self.bounds.size.width - pad - 34.0f, y + 9.0f);
-    _closeBtn.frame = CGRectMake(self.bounds.size.width - pad - 16.0f, y, 16.0f, 18.0f);
+    CGSize titleFit = [_titleLabel sizeThatFits:CGSizeMake(w - 70.0f, 18.0f)];
+    _titleLabel.frame = CGRectMake(pad, y, titleFit.width, 18.0f);
+
+    CGFloat switchCenterX = self.bounds.size.width - pad - 18.0f;
+    _enableSwitch.center = CGPointMake(switchCenterX, y + 9.0f);
+
+    CGFloat titleRight = pad + titleFit.width;
+    CGFloat switchLeft = switchCenterX - 18.0f;
+    CGFloat closeCenterX = roundf((titleRight + switchLeft) / 2.0f);
+    if (closeCenterX - 11.0f < titleRight + 4.0f) {
+        closeCenterX = titleRight + 4.0f + 11.0f;
+    }
+    _closeBtn.bounds = CGRectMake(0, 0, 22.0f, 22.0f);
+    _closeBtn.center = CGPointMake(closeCenterX, y + 9.0f);
 
     y += 21.0f;
     _separator.frame = CGRectMake(pad, y, w, 0.5f);
@@ -867,10 +760,6 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
     // 6. Hide Badges Button (Below Reset Defaults)
     _hideBadgesBtn.frame = CGRectMake(pad, y, w, 20.0f);
-    y += 20.0f + 3.0f;
-
-    // 7. Force 1440p Button (Below Hide Badges)
-    _force1440pBtn.frame = CGRectMake(pad, y, w, 20.0f);
 }
 
 - (void)refreshValues {
@@ -905,16 +794,6 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     // Hide / Show Badges Status
     BOOL badgesHidden = [[InstagramReverbHUDManager sharedManager] areBadgesHidden];
     [self.hideBadgesBtn setTitle:(badgesHidden ? @"Show Badges" : @"Hide Badges") forState:UIControlStateNormal];
-
-    // Force 1440p Status
-    BOOL isForced = InstagramDash1440p_IsForce1440pActive();
-    if (isForced) {
-        [self.force1440pBtn setTitle:@"1440p Forced" forState:UIControlStateNormal];
-        [self.force1440pBtn setTitleColor:[UIColor colorWithRed:0.0f green:0.9f blue:1.0f alpha:1.0f] forState:UIControlStateNormal];
-    } else {
-        [self.force1440pBtn setTitle:@"Force 1440p" forState:UIControlStateNormal];
-        [self.force1440pBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
-    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1050,34 +929,6 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     [self refreshValues];
 }
 
-- (void)force1440pTapped {
-    InstagramDash1440pCheckResult res = InstagramDash1440p_ForceCheckAndFetch1440p();
-    if (res == InstagramDash1440pCheckResult1440pFoundAndForced) {
-        UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
-        [fb impactOccurred];
-        [_force1440pBtn setTitle:@"1440p Forced!" forState:UIControlStateNormal];
-        [_force1440pBtn setTitleColor:[UIColor colorWithRed:0.0f green:0.9f blue:1.0f alpha:1.0f] forState:UIControlStateNormal];
-    } else if (res == InstagramDash1440pCheckResult1440pNotAvailable) {
-        UINotificationFeedbackGenerator *fb = [[UINotificationFeedbackGenerator alloc] init];
-        [fb notificationOccurred:UINotificationFeedbackTypeWarning];
-        [_force1440pBtn setTitle:@"No 1440p (Max 1080p)" forState:UIControlStateNormal];
-        [_force1440pBtn setTitleColor:[UIColor colorWithRed:1.0f green:0.65f blue:0.0f alpha:1.0f] forState:UIControlStateNormal];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self refreshValues];
-        });
-    } else if (res == InstagramDash1440pCheckResultArmed) {
-        UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-        [fb impactOccurred];
-        [_force1440pBtn setTitle:@"1440p Armed (Fetching...)" forState:UIControlStateNormal];
-        [_force1440pBtn setTitleColor:[UIColor colorWithRed:0.0f green:0.9f blue:1.0f alpha:1.0f] forState:UIControlStateNormal];
-    } else { // Disabled / Reset
-        UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-        [fb impactOccurred];
-        [_force1440pBtn setTitle:@"Force 1440p" forState:UIControlStateNormal];
-        [_force1440pBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
-    }
-}
-
 - (void)closeTapped {
     if (self.closeHandler) {
         self.closeHandler();
@@ -1087,129 +938,8 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 @end
 
 // ============================================================================
-// HUD Manager Singleton
-// ============================================================================
-// ============================================================================
-// Floating Draggable 1440p DASH Quality Pill
-// ============================================================================
-@interface InstagramDash1440pPill : UIView
-@property (nonatomic, strong) UIVisualEffectView *blurView;
-@property (nonatomic, strong) UIView *statusDot;
-@property (nonatomic, strong) UILabel *titleLabel;
-- (void)updateAppearance;
-@end
-
-@implementation InstagramDash1440pPill
-
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        self.backgroundColor = [UIColor colorWithRed:(18.0f/255.0f) green:(18.0f/255.0f) blue:(18.0f/255.0f) alpha:0.88f];
-        self.layer.cornerRadius = 10.0f;
-        self.layer.borderWidth = 1.0f;
-        self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.90f].CGColor;
-        self.clipsToBounds = YES;
-
-        UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
-        _blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
-        _blurView.frame = self.bounds;
-        _blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        _blurView.userInteractionEnabled = NO;
-        [self addSubview:_blurView];
-
-        _statusDot = [[UIView alloc] initWithFrame:CGRectMake(8.0f, 7.5f, 5.0f, 5.0f)];
-        _statusDot.layer.cornerRadius = 2.5f;
-        _statusDot.layer.masksToBounds = YES;
-        _statusDot.userInteractionEnabled = NO;
-        [self addSubview:_statusDot];
-
-        _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(17.0f, 0.0f, frame.size.width - 23.0f, 20.0f)];
-        _titleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightBold];
-        _titleLabel.textColor = [UIColor whiteColor];
-        _titleLabel.textAlignment = NSTextAlignmentLeft;
-        _titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-        _titleLabel.userInteractionEnabled = NO;
-        [self addSubview:_titleLabel];
-
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
-        [self addGestureRecognizer:tap];
-
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-        [self addGestureRecognizer:pan];
-
-        [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(onDashStateChanged:)
-                                                     name:kInstagramDash1440pStateDidChangeNotification
-                                                   object:nil];
-        [self updateAppearance];
-    }
-    return self;
-}
-
-- (void)handleTap:(UITapGestureRecognizer *)gesture {
-    InstagramDash1440p_CycleMode();
-    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-    [feedback impactOccurred];
-    [self updateAppearance];
-}
-
-- (void)handlePan:(UIPanGestureRecognizer *)pan {
-    UIView *superview = self.superview;
-    if (!superview) return;
-
-    CGPoint translation = [pan translationInView:superview];
-    CGPoint newCenter = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
-
-    CGFloat halfW = self.bounds.size.width / 2.0f;
-    CGFloat halfH = self.bounds.size.height / 2.0f;
-    newCenter.x = MAX(halfW + 6.0f, MIN(superview.bounds.size.width - halfW - 6.0f, newCenter.x));
-    newCenter.y = MAX(halfH + 30.0f, MIN(superview.bounds.size.height - halfH - 30.0f, newCenter.y));
-
-    self.center = newCenter;
-    [pan setTranslation:CGPointZero inView:superview];
-}
-
-- (void)onDashStateChanged:(NSNotification *)note {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self updateAppearance];
-    });
-}
-
-- (void)updateAppearance {
-    BOOL isForced = InstagramDash1440p_IsForce1440pActive();
-    NSString *repId = InstagramDash1440p_GetCurrentRepresentationId() ?: @"ready";
-
-    NSString *text = nil;
-    if (!isForced) {
-        text = [NSString stringWithFormat:@"OFF (IG Default): %@", repId];
-        self.layer.borderColor = [UIColor colorWithWhite:0.6f alpha:0.45f].CGColor;
-        self.statusDot.backgroundColor = [UIColor colorWithWhite:0.6f alpha:0.8f];
-        self.titleLabel.textColor = [UIColor colorWithWhite:0.75f alpha:1.0f];
-    } else {
-        text = [NSString stringWithFormat:@"Forced [1440p]: %@", repId];
-        self.layer.borderColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:0.95f].CGColor;
-        self.statusDot.backgroundColor = [UIColor colorWithRed:(0.0f/255.0f) green:(229.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
-        self.titleLabel.textColor = [UIColor whiteColor];
-    }
-    self.titleLabel.text = text;
-
-    CGSize fit = [self.titleLabel sizeThatFits:CGSizeMake(360.0f, 20.0f)];
-    CGFloat targetWidth = MAX(130.0f, MIN(360.0f, fit.width + 26.0f));
-
-    CGRect f = self.frame;
-    f.size.width = targetWidth;
-    f.size.height = 20.0f;
-    self.frame = f;
-    self.titleLabel.frame = CGRectMake(17.0f, 0.0f, targetWidth - 23.0f, 20.0f);
-}
-
-@end
-
-
-// ============================================================================
 // Real-Time System & Hardware Performance Telemetry Badge (2-Second Polling)
 // ============================================================================
-
 typedef struct {
     uint64_t wifiInBytes;
     uint64_t wifiOutBytes;
@@ -1217,201 +947,99 @@ typedef struct {
     uint64_t cellOutBytes;
 } PerfNetStats;
 
-@interface InstagramPerfHUDPill : UIView
-@property (nonatomic, strong) UIVisualEffectView *blurView;
-@property (nonatomic, strong) UIView *statusDot;
-@property (nonatomic, strong) UILabel *titleLabel;
-@property (nonatomic, strong) NSTimer *pollTimer;
-@property (nonatomic, assign) NSInteger displayMode;
-@property (nonatomic, assign) PerfNetStats lastNetStats;
-@property (nonatomic, assign) NSTimeInterval lastPollTimestamp;
-@property (nonatomic, assign) BOOL isDimmed;
-- (void)startPolling;
-- (void)stopPolling;
-- (void)refreshMetrics;
-@end
-
-@implementation InstagramPerfHUDPill
+static NSString *FormatDataRate(double bytesPerSec) {
+    if (bytesPerSec < 1024.0) {
+        return [NSString stringWithFormat:@"%.0f B/s", bytesPerSec];
+    } else if (bytesPerSec < 1024.0 * 1024.0) {
+        return [NSString stringWithFormat:@"%.0f KB/s", bytesPerSec / 1024.0];
+    } else {
+        return [NSString stringWithFormat:@"%.1f MB/s", bytesPerSec / (1024.0 * 1024.0)];
+    }
+}
 
 static float QueryCurrentProcessCPU(void) {
     kern_return_t kr;
-    thread_array_t threadList;
-    mach_msg_type_number_t threadCount = 0;
+    task_info_data_t tinfo;
+    mach_msg_type_number_t task_info_count = TASK_INFO_MAX;
 
-    kr = task_threads(mach_task_self(), &threadList, &threadCount);
-    if (kr != KERN_SUCCESS) {
-        return 0.0f;
-    }
+    kr = task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)tinfo, &task_info_count);
+    if (kr != KERN_SUCCESS) return 0.0f;
 
-    float totalCpu = 0.0f;
-    for (mach_msg_type_number_t i = 0; i < threadCount; i++) {
-        thread_info_data_t thInfo;
-        mach_msg_type_number_t infoCount = THREAD_INFO_MAX;
-        kr = thread_info(threadList[i], THREAD_BASIC_INFO, (thread_info_t)thInfo, &infoCount);
+    thread_array_t thread_list;
+    mach_msg_type_number_t thread_count;
+    kr = task_threads(mach_task_self(), &thread_list, &thread_count);
+    if (kr != KERN_SUCCESS) return 0.0f;
+
+    float total_cpu = 0.0f;
+    for (mach_msg_type_number_t i = 0; i < thread_count; i++) {
+        thread_basic_info_data_t thinfo;
+        mach_msg_type_number_t thread_info_count = THREAD_INFO_MAX;
+        kr = thread_info(thread_list[i], THREAD_BASIC_INFO, (thread_info_t)&thinfo, &thread_info_count);
         if (kr == KERN_SUCCESS) {
-            thread_basic_info_t basicInfo = (thread_basic_info_t)thInfo;
-            if (!(basicInfo->flags & TH_FLAGS_IDLE)) {
-                totalCpu += (basicInfo->cpu_usage / (float)TH_USAGE_SCALE) * 100.0f;
+            if (!(thinfo.flags & TH_FLAGS_IDLE)) {
+                total_cpu += (float)thinfo.cpu_usage / (float)TH_USAGE_SCALE * 100.0f;
             }
         }
     }
-
-    vm_deallocate(mach_task_self(), (vm_address_t)threadList, threadCount * sizeof(thread_t));
-    return totalCpu;
-}
-
-static float ExtractGPUValueFromDict(CFDictionaryRef dict) {
-    if (!dict || CFGetTypeID(dict) != CFDictionaryGetTypeID()) return -1.0f;
-    const CFStringRef keys[] = {
-        CFSTR("Device Utilization %"),
-        CFSTR("GPU Core Utilization"),
-        CFSTR("Renderer Utilization %"),
-        CFSTR("Tiler Utilization %"),
-        CFSTR("Device Utilization"),
-        CFSTR("gpu-core-utilization"),
-        CFSTR("device-utilization")
-    };
-    for (size_t k = 0; k < sizeof(keys)/sizeof(keys[0]); k++) {
-        CFTypeRef num = CFDictionaryGetValue(dict, keys[k]);
-        if (num && CFGetTypeID(num) == CFNumberGetTypeID()) {
-            float val = 0.0f;
-            if (CFNumberGetValue((CFNumberRef)num, kCFNumberFloatType, &val)) {
-                if (val >= 0.0f) {
-                    return val;
-                }
-            }
-        }
-    }
-    return -1.0f;
+    vm_deallocate(mach_task_self(), (vm_address_t)thread_list, thread_count * sizeof(thread_act_t));
+    return total_cpu;
 }
 
 static float QueryCurrentGPU(void) {
-    static void *s_iokit = NULL;
-    static dispatch_once_t s_once;
-    typedef void* io_service_t;
-    typedef void* io_iterator_t;
-    typedef void* io_registry_entry_t;
-    typedef CFMutableDictionaryRef (*IOServiceMatchingFunc)(const char *name);
-    typedef kern_return_t (*IOServiceGetMatchingServicesFunc)(mach_port_t mainPort, CFDictionaryRef matching, io_iterator_t *existing);
-    typedef io_registry_entry_t (*IOIteratorNextFunc)(io_iterator_t iterator);
-    typedef kern_return_t (*IORegistryEntryCreateCFPropertiesFunc)(io_registry_entry_t entry, CFMutableDictionaryRef *properties, CFAllocatorRef allocator, uint32_t options);
-    typedef kern_return_t (*IOObjectReleaseFunc)(void *object);
-
-    static IOServiceMatchingFunc s_IOServiceMatching = NULL;
-    static IOServiceGetMatchingServicesFunc s_IOServiceGetMatchingServices = NULL;
-    static IOIteratorNextFunc s_IOIteratorNext = NULL;
-    static IORegistryEntryCreateCFPropertiesFunc s_IORegistryEntryCreateCFProperties = NULL;
-    static IOObjectReleaseFunc s_IOObjectRelease = NULL;
-
-    dispatch_once(&s_once, ^{
-        s_iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY | RTLD_GLOBAL);
-        void *handle = s_iokit ? s_iokit : RTLD_DEFAULT;
-        s_IOServiceMatching = (IOServiceMatchingFunc)dlsym(handle, "IOServiceMatching");
-        s_IOServiceGetMatchingServices = (IOServiceGetMatchingServicesFunc)dlsym(handle, "IOServiceGetMatchingServices");
-        s_IOIteratorNext = (IOIteratorNextFunc)dlsym(handle, "IOIteratorNext");
-        s_IORegistryEntryCreateCFProperties = (IORegistryEntryCreateCFPropertiesFunc)dlsym(handle, "IORegistryEntryCreateCFProperties");
-        s_IOObjectRelease = (IOObjectReleaseFunc)dlsym(handle, "IOObjectRelease");
-    });
-
-    if (!s_IOServiceMatching || !s_IOServiceGetMatchingServices || !s_IOIteratorNext || !s_IORegistryEntryCreateCFProperties || !s_IOObjectRelease) {
-        return -1.0f;
-    }
-
-    const char *serviceNames[] = {
-        "AGXAccelerator",
-        "IOGPU",
-        "IOAccelerator",
-        "AppleARMGPU",
-        "IOAcceleratorES"
-    };
-
-    float gpuUsage = -1.0f;
-    for (size_t s = 0; s < sizeof(serviceNames)/sizeof(serviceNames[0]); s++) {
-        CFMutableDictionaryRef matchDict = s_IOServiceMatching(serviceNames[s]);
-        if (!matchDict) continue;
-
-        io_iterator_t iterator = 0;
-        kern_return_t kr = s_IOServiceGetMatchingServices(0, matchDict, &iterator);
-        if (kr != KERN_SUCCESS || !iterator) continue;
-
-        io_registry_entry_t entry = 0;
-        while ((entry = s_IOIteratorNext(iterator)) != 0) {
-            CFMutableDictionaryRef props = NULL;
-            if (s_IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS && props) {
-                CFDictionaryRef perfStats = (CFDictionaryRef)CFDictionaryGetValue(props, CFSTR("PerformanceStatistics"));
-                float val = ExtractGPUValueFromDict(perfStats);
-                if (val < 0.0f) {
-                    val = ExtractGPUValueFromDict(props);
-                }
-                CFRelease(props);
-
-                if (val >= 0.0f) {
-                    gpuUsage = val;
-                    s_IOObjectRelease(entry);
-                    break;
-                }
-            }
-            s_IOObjectRelease(entry);
-        }
-        s_IOObjectRelease(iterator);
-        if (gpuUsage >= 0.0f) break;
-    }
-
-    return gpuUsage;
+    return -1.0f;
 }
 
 static PerfNetStats QueryCurrentNetStats(void) {
     PerfNetStats stats = {0, 0, 0, 0};
     struct ifaddrs *interfaces = NULL;
-    int ret = InstagramWifiSpoofer_GetRawIfAddrs(&interfaces);
-    if (ret != 0) {
-        ret = getifaddrs(&interfaces);
-    }
-    if (ret == 0 && interfaces) {
-        struct ifaddrs *ifa = interfaces;
-        while (ifa) {
-            if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_LINK) {
-                struct if_data *ifData = (struct if_data *)ifa->ifa_data;
-                if (ifData) {
-                    const char *name = ifa->ifa_name;
-                    if (strncmp(name, "en", 2) == 0) {
-                        stats.wifiInBytes += ifData->ifi_ibytes;
-                        stats.wifiOutBytes += ifData->ifi_obytes;
-                    } else if (strncmp(name, "pdp_ip", 6) == 0) {
-                        stats.cellInBytes += ifData->ifi_ibytes;
-                        stats.cellOutBytes += ifData->ifi_obytes;
+    if (getifaddrs(&interfaces) == 0) {
+        struct ifaddrs *iface = interfaces;
+        while (iface != NULL) {
+            if (iface->ifa_addr != NULL && iface->ifa_addr->sa_family == AF_LINK) {
+                NSString *name = [NSString stringWithUTF8String:iface->ifa_name];
+                struct if_data *if_data = (struct if_data *)iface->ifa_data;
+                if (if_data != NULL) {
+                    if ([name hasPrefix:@"en"]) {
+                        stats.wifiInBytes += if_data->ifi_ibytes;
+                        stats.wifiOutBytes += if_data->ifi_obytes;
+                    } else if ([name hasPrefix:@"pdp_ip"]) {
+                        stats.cellInBytes += if_data->ifi_ibytes;
+                        stats.cellOutBytes += if_data->ifi_obytes;
                     }
                 }
             }
-            ifa = ifa->ifa_next;
+            iface = iface->ifa_next;
         }
         freeifaddrs(interfaces);
     }
     return stats;
 }
 
-static NSString *FormatDataRate(double bytesPerSec) {
-    if (bytesPerSec >= 1024.0 * 1024.0) {
-        return [NSString stringWithFormat:@"%.1fM/s", bytesPerSec / (1024.0 * 1024.0)];
-    } else if (bytesPerSec >= 1024.0) {
-        return [NSString stringWithFormat:@"%.0fK/s", bytesPerSec / 1024.0];
-    } else {
-        return [NSString stringWithFormat:@"%.0fB/s", bytesPerSec];
-    }
-}
+@interface InstagramPerfHUDPill : UIView
+
+@property (nonatomic, strong) UIVisualEffectView *blurView;
+@property (nonatomic, strong) UIView *statusDot;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) NSTimer *pollTimer;
+@property (nonatomic, assign) NSInteger displayMode;
+@property (nonatomic, assign) BOOL isDimmed;
+@property (nonatomic, assign) PerfNetStats lastNetStats;
+@property (nonatomic, assign) NSTimeInterval lastPollTimestamp;
+
+- (void)startPolling;
+- (void)stopPolling;
+
+@end
+
+@implementation InstagramPerfHUDPill
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        _displayMode = 0;
-        _isDimmed = NO;
-        _lastPollTimestamp = [NSDate timeIntervalSinceReferenceDate];
-        _lastNetStats = QueryCurrentNetStats();
-
-        self.backgroundColor = [UIColor colorWithRed:(18.0f/255.0f) green:(18.0f/255.0f) blue:(18.0f/255.0f) alpha:0.88f];
+        self.backgroundColor = [UIColor colorWithRed:(25.0f/255.0f) green:(15.0f/255.0f) blue:(35.0f/255.0f) alpha:0.88f];
         self.layer.cornerRadius = 10.0f;
         self.layer.borderWidth = 1.0f;
-        self.layer.borderColor = [UIColor colorWithRed:(155.0f/255.0f) green:(130.0f/255.0f) blue:(255.0f/255.0f) alpha:0.85f].CGColor;
+        self.layer.borderColor = [UIColor colorWithRed:(170.0f/255.0f) green:(100.0f/255.0f) blue:(255.0f/255.0f) alpha:0.90f].CGColor;
         self.clipsToBounds = YES;
 
         UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
@@ -1422,9 +1050,9 @@ static NSString *FormatDataRate(double bytesPerSec) {
         [self addSubview:_blurView];
 
         _statusDot = [[UIView alloc] initWithFrame:CGRectMake(8.0f, 7.5f, 5.0f, 5.0f)];
+        _statusDot.backgroundColor = [UIColor colorWithRed:(180.0f/255.0f) green:(110.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
         _statusDot.layer.cornerRadius = 2.5f;
         _statusDot.layer.masksToBounds = YES;
-        _statusDot.backgroundColor = [UIColor colorWithRed:(170.0f/255.0f) green:(140.0f/255.0f) blue:(255.0f/255.0f) alpha:1.0f];
         _statusDot.userInteractionEnabled = NO;
         [self addSubview:_statusDot];
 
@@ -1432,30 +1060,24 @@ static NSString *FormatDataRate(double bytesPerSec) {
         _titleLabel.font = [UIFont systemFontOfSize:9.0f weight:UIFontWeightBold];
         _titleLabel.textColor = [UIColor whiteColor];
         _titleLabel.textAlignment = NSTextAlignmentLeft;
-        _titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-        _titleLabel.text = @"CPU: -- | GPU: -- | Net: --";
         _titleLabel.userInteractionEnabled = NO;
         [self addSubview:_titleLabel];
+
+        _displayMode = 0;
+        _isDimmed = NO;
+        _lastNetStats = QueryCurrentNetStats();
+        _lastPollTimestamp = [NSDate timeIntervalSinceReferenceDate];
 
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
         [self addGestureRecognizer:tap];
 
-        UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-        longPress.minimumPressDuration = 1.0;
-        [self addGestureRecognizer:longPress];
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
+        [self addGestureRecognizer:lp];
 
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:pan];
 
-        [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(stopPolling)
-                                                     name:UIApplicationDidEnterBackgroundNotification
-                                                   object:nil];
-        [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(startPolling)
-                                                     name:UIApplicationWillEnterForegroundNotification
-                                                   object:nil];
-
+        [self refreshMetrics];
         [self startPolling];
     }
     return self;
@@ -1503,9 +1125,7 @@ static NSString *FormatDataRate(double bytesPerSec) {
         double cellRate = (double)deltaCell / elapsed;
 
         NSString *netText = nil;
-        if (InstagramWifiSpoofer_IsCellularData()) {
-            netText = [NSString stringWithFormat:@"Cell: %@", FormatDataRate(cellRate > 0.0 ? cellRate : (wifiRate > 0.0 ? wifiRate : 0.0))];
-        } else if (cellRate > wifiRate && cellRate > 1024.0) {
+        if (cellRate > wifiRate && cellRate > 1024.0) {
             netText = [NSString stringWithFormat:@"Cell: %@", FormatDataRate(cellRate)];
         } else {
             netText = [NSString stringWithFormat:@"WiFi: %@", FormatDataRate(wifiRate)];
@@ -1559,11 +1179,11 @@ static NSString *FormatDataRate(double bytesPerSec) {
 
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        self.isDimmed = !self.isDimmed;
-        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleHeavy];
         [feedback impactOccurred];
+        self.isDimmed = !self.isDimmed;
         [UIView animateWithDuration:0.25 animations:^{
-            self.alpha = self.isDimmed ? 0.25f : 1.0f;
+            self.alpha = self.isDimmed ? 0.05f : 1.0f;
         }];
     }
 }
@@ -1586,9 +1206,11 @@ static NSString *FormatDataRate(double bytesPerSec) {
 
 @end
 
+// ============================================================================
+// HUD Manager Singleton
+// ============================================================================
 @interface InstagramReverbHUDManager ()
 @property (nonatomic, strong) InstagramPerfHUDPill *perfPill;
-@property (nonatomic, strong) InstagramDash1440pPill *dashPill;
 @property (nonatomic, strong) InstagramReverbOverlayWindow *overlayWindow;
 @property (nonatomic, strong) InstagramReverbFloatingButton *floatingButton;
 @property (nonatomic, strong) InstagramReverbVolumeBar *volumeBar;
@@ -1628,23 +1250,15 @@ static NSString *FormatDataRate(double bytesPerSec) {
 
     if (hidden) {
         [self.perfPill stopPolling];
-    } else {
-        [self.perfPill startPolling];
-    }
-
-    if (hidden) {
         [UIView animateWithDuration:0.25 animations:^{
-            self.dashPill.alpha = 0.0f;
             self.perfPill.alpha = 0.0f;
         } completion:^(BOOL finished) {
-            self.dashPill.hidden = YES;
             self.perfPill.hidden = YES;
         }];
     } else {
-        self.dashPill.hidden = NO;
         self.perfPill.hidden = NO;
+        [self.perfPill startPolling];
         [UIView animateWithDuration:0.25 animations:^{
-            self.dashPill.alpha = 1.0f;
             self.perfPill.alpha = 1.0f;
         }];
     }
@@ -1652,10 +1266,6 @@ static NSString *FormatDataRate(double bytesPerSec) {
 
 - (void)toggleBadgesHidden {
     [self setBadgesHidden:!_areBadgesHidden];
-}
-
-- (void)forceCheckAndFetch1440p {
-    InstagramDash1440p_ForceCheckAndFetch1440p();
 }
 
 - (UIWindowScene *)findActiveWindowScene {
@@ -1690,7 +1300,7 @@ static NSString *FormatDataRate(double bytesPerSec) {
             } else {
                 self.overlayWindow = [[InstagramReverbOverlayWindow alloc] initWithFrame:screenBounds];
             }
-            self.overlayWindow.windowLevel = UIWindowLevelNormal + 1000.0f; // Above Reels, Stories & modals
+            self.overlayWindow.windowLevel = UIWindowLevelNormal + 1000.0f;
             self.overlayWindow.backgroundColor = [UIColor clearColor];
             self.overlayWindow.rootViewController = [[InstagramReverbOverlayViewController alloc] init];
             self.overlayWindow.hidden = NO;
@@ -1709,7 +1319,7 @@ static NSString *FormatDataRate(double bytesPerSec) {
         if (!self.floatingButton) {
             CGFloat btnSize = 44.0f;
             CGFloat x = container.bounds.size.width - btnSize - 12.0f;
-            CGFloat y = container.bounds.size.height - btnSize - 110.0f; // Above bottom tab bar
+            CGFloat y = container.bounds.size.height - btnSize - 110.0f;
             self.floatingButton = [[InstagramReverbFloatingButton alloc] initWithFrame:CGRectMake(x, y, btnSize, btnSize)];
 
             __weak typeof(self) weakSelf = self;
@@ -1723,7 +1333,6 @@ static NSString *FormatDataRate(double bytesPerSec) {
             [container bringSubviewToFront:self.floatingButton];
         }
 
-        // Separate Thin Vertical 70x20px Draggable System Volume Bar
         if (!self.volumeBar) {
             CGFloat barW = 20.0f;
             CGFloat barH = 70.0f;
@@ -1738,34 +1347,11 @@ static NSString *FormatDataRate(double bytesPerSec) {
             [self.volumeBar revealAndResetTimer];
         }
 
-        // Floating 1440p DASH Quality Pill in top-right
-        if (!self.dashPill) {
-            CGFloat pillW = 130.0f;
-            CGFloat pillH = 20.0f;
-            CGFloat initialX = container.bounds.size.width - pillW - 12.0f;
-            CGFloat initialY = 54.0f; // Below status bar notch
-            self.dashPill = [[InstagramDash1440pPill alloc] initWithFrame:CGRectMake(initialX, initialY, pillW, pillH)];
-            if (self.areBadgesHidden) {
-                self.dashPill.alpha = 0.0f;
-                self.dashPill.hidden = YES;
-            }
-            [container addSubview:self.dashPill];
-            [self.dashPill updateAppearance];
-        } else if (!self.dashPill.superview) {
-            if (self.areBadgesHidden) {
-                self.dashPill.alpha = 0.0f;
-                self.dashPill.hidden = YES;
-            }
-            [container addSubview:self.dashPill];
-            [self.dashPill updateAppearance];
-        }
-
-        // Floating Performance Telemetry Pill right underneath dashPill
         if (!self.perfPill) {
             CGFloat perfW = 160.0f;
             CGFloat perfH = 20.0f;
             CGFloat initialX = container.bounds.size.width - perfW - 12.0f;
-            CGFloat initialY = 78.0f; // Directly below dashPill (54.0f + 20.0f + 4.0f)
+            CGFloat initialY = 78.0f;
             self.perfPill = [[InstagramPerfHUDPill alloc] initWithFrame:CGRectMake(initialX, initialY, perfW, perfH)];
             if (self.areBadgesHidden) {
                 self.perfPill.alpha = 0.0f;
@@ -1814,16 +1400,25 @@ static NSString *FormatDataRate(double bytesPerSec) {
         if (!container) return;
 
         CGRect winBounds = container.bounds;
-
-        // Compact Half-Screen Mini-Widget Layout:
-        // Width ~196pt (strictly half of 393pt screen), docked to the bottom-right corner
         CGFloat screenW = winBounds.size.width;
         CGFloat screenH = winBounds.size.height;
-        CGFloat rightMargin = 10.0f;
-        CGFloat hudW = roundf(screenW * 0.50f); // Exactly half-screen width
-        CGFloat hudH = 245.0f;                 // Scaled-down compact height with buttons
-        CGFloat hudX = screenW - hudW - rightMargin; // Right-hand corner docked
-        CGFloat hudY = screenH - hudH - 95.0f;       // Bottom thumb sweep zone
+        CGFloat hudW = roundf(screenW * 0.50f);
+        CGFloat hudH = 222.0f; // Scaled height for Reverb & Pitch panel
+
+        // Position panel right beside the floating button:
+        // If floating button is on left half -> open to the right / inside
+        // If floating button is on right half -> open to the left / inside
+        CGRect btnFrame = self.floatingButton ? self.floatingButton.frame : CGRectMake(screenW - 56.0f, screenH - 150.0f, 44.0f, 44.0f);
+        CGFloat hudX = 0.0f;
+        if (CGRectGetMidX(btnFrame) < screenW / 2.0f) {
+            hudX = CGRectGetMaxX(btnFrame) + 8.0f;
+        } else {
+            hudX = CGRectGetMinX(btnFrame) - hudW - 8.0f;
+        }
+        hudX = MAX(8.0f, MIN(screenW - hudW - 8.0f, hudX));
+
+        CGFloat hudY = CGRectGetMidY(btnFrame) - (hudH / 2.0f);
+        hudY = MAX(44.0f, MIN(screenH - hudH - 34.0f, hudY));
 
         if (!self.hudView) {
             self.hudView = [[InstagramReverbHUDView alloc] initWithFrame:CGRectMake(hudX, hudY, hudW, hudH)];
@@ -1836,12 +1431,9 @@ static NSString *FormatDataRate(double bytesPerSec) {
             [self.hudView refreshValues];
         }
 
-        // Add ONLY the HUD view to container. NO full-screen dim background view is added,
-        // ensuring touches outside the HUD pass through completely to Instagram beneath.
         [container addSubview:self.hudView];
         [container bringSubviewToFront:self.hudView];
 
-        // Smooth spring animation
         self.hudView.alpha = 0.0f;
         self.hudView.transform = CGAffineTransformMakeScale(0.85f, 0.85f);
         self.isHUDVisible = YES;
@@ -1855,7 +1447,7 @@ static NSString *FormatDataRate(double bytesPerSec) {
 
 - (void)hideHUD {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!self.isHUDVisible) return;
+        if (!self.isHUDVisible || !self.hudView) return;
         self.isHUDVisible = NO;
 
         [UIView animateWithDuration:0.2 animations:^{
@@ -1870,14 +1462,25 @@ static NSString *FormatDataRate(double bytesPerSec) {
 @end
 
 // ============================================================================
-// Auto-Register UI Overlay on App Launch
+// Auto-Initialization Constructor
 // ============================================================================
 __attribute__((constructor))
-static void InstagramReverbUIInit(void) {
+static void InstagramReverbUIAutoInit(void) {
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification * _Nonnull note) {
+        [[InstagramReverbHUDManager sharedManager] startOverlay];
+    }];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [[InstagramReverbHUDManager sharedManager] startOverlay];
+    });
+
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
-                                                   usingBlock:^(NSNotification * _Nonnull note) {
+                                                  usingBlock:^(NSNotification * _Nonnull note) {
         [[InstagramReverbHUDManager sharedManager] startOverlay];
     }];
 }

@@ -154,7 +154,7 @@ def test_modes():
         h = f.read()
     with open("InstagramDash1440p.mm", "r", encoding="utf-8") as f:
         mm = f.read()
-    with open("InstagramReverbUI.m", "r", encoding="utf-8") as f:
+    with open("InstagramDash1440pUI.m", "r", encoding="utf-8") as f:
         ui = f.read()
 
     assert "InstagramDash1440p_ForceCheckAndFetch1440p" in h
@@ -163,7 +163,7 @@ def test_modes():
     assert "InstagramDash1440p_ForceCheckAndFetch1440p" in mm
     assert "InstagramDash1440p_IsForce1440pActive" in mm
     assert "InstagramDash1440p_ForceCheckAndFetch1440p" in ui
-    assert "force1440pBtn" in ui
+    assert "dashPill" in ui
     assert "PruneManifestXml" in mm
     print("   [6/6] PASS: Source code declarations and UI linkage are 100% synchronized.")
 
