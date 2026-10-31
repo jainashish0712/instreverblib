@@ -656,10 +656,13 @@ static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrid
     id forcedRep = g_forced1440pRep;
     pthread_mutex_unlock(&g_stateMutex);
 
-    if (isForced && forcedRep) {
-        NSString *forcedId = GetRepresentationId(forcedRep);
-        if (forcedId && [forcedId isEqualToString:repId]) {
-            is1440 = YES;
+    if (isForced) {
+        is1440 = YES;
+        if (forcedRep) {
+            NSString *forcedId = GetRepresentationId(forcedRep);
+            if (forcedId && forcedId.length > 0) {
+                repId = forcedId;
+            }
         }
     }
 
@@ -874,48 +877,24 @@ static id PruneManifestXml(id contentsOfXml) {
             return contentsOfXml;
         }
 
-        if (videoReps.size() <= 1) {
+        if (!has1440 || videoReps.size() <= 1) {
+            // No 1440p representation in manifest: Return 100% untouched for Instagram's default playback!
             return contentsOfXml;
         }
 
         int targetIdx = -1;
-
-        // Force 1440p Active: Prioritize 1440p regardless of Wi-Fi or Cellular, fallback to 1080p floor
-        if (has1440) {
-            uint64_t bestBw = 0;
-            for (size_t i = 0; i < videoReps.size(); i++) {
-                if (videoReps[i].is1440) {
-                    if (targetIdx == -1 || videoReps[i].bandwidth > bestBw) {
-                        bestBw = videoReps[i].bandwidth;
-                        targetIdx = (int)i;
-                    }
-                }
-            }
-        } else if (has1080) {
-            uint64_t bestBw = 0;
-            for (size_t i = 0; i < videoReps.size(); i++) {
-                if (videoReps[i].is1080) {
-                    if (targetIdx == -1 || videoReps[i].bandwidth > bestBw) {
-                        bestBw = videoReps[i].bandwidth;
-                        targetIdx = (int)i;
-                    }
+        uint64_t bestBw = 0;
+        for (size_t i = 0; i < videoReps.size(); i++) {
+            if (videoReps[i].is1440) {
+                if (targetIdx == -1 || videoReps[i].bandwidth > bestBw) {
+                    bestBw = videoReps[i].bandwidth;
+                    targetIdx = (int)i;
                 }
             }
         }
 
-        // If neither 1440p nor 1080p is available (e.g. video only uploaded in 720p), pick highest metric
         if (targetIdx == -1) {
-            uint64_t bestMetric = 0;
-            for (size_t i = 0; i < videoReps.size(); i++) {
-                uint64_t metric = (uint64_t)videoReps[i].width * videoReps[i].height * 10000ULL + videoReps[i].bandwidth;
-                if (targetIdx == -1 || metric > bestMetric) {
-                    bestMetric = metric;
-                    targetIdx = (int)i;
-                }
-            }
-            if (targetIdx == -1) {
-                targetIdx = 0;
-            }
+            return contentsOfXml;
         }
 
         NSMutableString *prunedStr = [xmlStr mutableCopy];

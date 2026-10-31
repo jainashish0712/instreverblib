@@ -89,15 +89,10 @@ def simulate_pruner(xml, force_active):
         return xml
 
     has_1440 = any(vr['w'] >= 1200 or vr['h'] >= 2200 for vr in video_reps)
-    has_1080 = any(vr['w'] >= 960 or vr['h'] >= 1700 for vr in video_reps)
+    if not has_1440:
+        return xml
 
-    target = None
-    if has_1440:
-        target = max([vr for vr in video_reps if vr['w'] >= 1200 or vr['h'] >= 2200], key=lambda x: (x['w']*x['h'], x['bw']))
-    elif has_1080:
-        target = max([vr for vr in video_reps if vr['w'] >= 960 or vr['h'] >= 1700], key=lambda x: (x['w']*x['h'], x['bw']))
-    else:
-        target = max(video_reps, key=lambda x: (x['w']*x['h'], x['bw']))
+    target = max([vr for vr in video_reps if vr['w'] >= 1200 or vr['h'] >= 2200], key=lambda x: (x['w']*x['h'], x['bw']))
 
     pruned = xml
     for vr in sorted(video_reps, key=lambda x: x['span'][0], reverse=True):
@@ -141,12 +136,13 @@ def test_modes():
     assert 'audio_1' in forced_cell
     print("   [3/6] PASS: On Cellular Data: 1440p is forced regardless of network interface.")
 
-    # 4. Fallback floor: Reel lacks 1440p -> cleanly falls back to 1080p floor (no 720p)
+    # 4. Reel lacks 1440p on CDN: Manifest remains 100% untouched for Instagram default playback (zero 1080p forcing)
     forced_fallback = simulate_pruner(sample_mpd_1080_only, force_active=True)
+    assert forced_fallback == sample_mpd_1080_only
     assert '1079848834835350v' in forced_fallback
-    assert '720p_v' not in forced_fallback
+    assert '720p_v' in forced_fallback
     assert 'audio_1' in forced_fallback
-    print("   [4/6] PASS: Reel with no 1440p on CDN falls back strictly to 1080p (no 720p).")
+    print("   [4/6] PASS: Reel with no 1440p on CDN leaves manifest 100% untouched (zero 1080p forcing).")
 
     # 5. Audio AdaptationSet preserved perfectly
     assert '<AdaptationSet mimeType="audio/mp4">' in forced_1440
