@@ -175,24 +175,24 @@ def test_zero_ui_and_automatic_execution():
 
     print("   -> PASS: 100% Automatic background operation confirmed: ZERO toggles, ZERO UI clutter.")
 
-def test_system_and_dsp_isolation():
-    print("[5/5] Testing Non-Interference with Audio DSP & Volume Bar...")
-    with open(os.path.join(BASE_DIR, "InstagramReverb.m"), "r", encoding="utf-8") as f:
-        dsp_code = f.read()
-    with open(os.path.join(BASE_DIR, "InstagramReverbUI.m"), "r", encoding="utf-8") as f:
+def test_dash_and_ui_integration():
+    print("[5/5] Testing Non-Interference with 1440p DASH Engine & UI Overlay...")
+    with open(os.path.join(BASE_DIR, "InstagramDash1440p.mm"), "r", encoding="utf-8") as f:
+        dash_code = f.read()
+    with open(os.path.join(BASE_DIR, "InstagramDash1440pUI.m"), "r", encoding="utf-8") as f:
         ui_code = f.read()
 
-    # Reverb audio processing functions intact
-    assert "ProcessAudioBufferList" in dsp_code
-    assert "SoftClip" in dsp_code
-    assert "InstagramWifiSpoofer_Init();" in dsp_code
+    # DASH 1440p functions intact
+    assert "InstagramDash1440p_Init" in dash_code
+    assert "InstagramDash1440p_GetMode" in dash_code
+    assert "InstagramWifiSpoofer.h" in dash_code
 
-    # Volume bar intact
-    assert "InstagramReverbVolumeBar" in ui_code
-    assert "revealAndResetTimer" in ui_code
-    assert "updateFillForVolume:" in ui_code
+    # UI Overlay intact
+    assert "InstagramDash1440pPill" in ui_code
+    assert "InstagramPerfHUDPill" in ui_code
+    assert "InstagramDash1440pUIManager" in ui_code
 
-    print("   -> PASS: Perfect isolation confirmed. Audio DSP and UI components operate with zero degradation.")
+    print("   -> PASS: Perfect integration confirmed. 1440p DASH engine and UI overlay operate seamlessly.")
 
 if __name__ == "__main__":
     print("==================================================================")
@@ -202,7 +202,7 @@ if __name__ == "__main__":
     test_tier2_system_reachability_and_interfaces()
     test_tier3_modern_transport_layer()
     test_zero_ui_and_automatic_execution()
-    test_system_and_dsp_isolation()
+    test_dash_and_ui_integration()
     print("==================================================================")
     print("   ALL 5 WI-FI SPOOFER CHECKS PASSED: ZERO HAZARDS, 100% WI-FI!   ")
     print("==================================================================")

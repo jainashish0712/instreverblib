@@ -3,15 +3,18 @@
 Test Suite for InstagramPerfHUDPill (Real-Time 2s CPU, GPU & Network Telemetry Badge)
 """
 
+import os
 import re
 import sys
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def verify_perf_badge():
     print("==================================================================")
     print("   INSTAGRAM REAL-TIME CPU, GPU & NETWORK TELEMETRY BADGE AUDIT   ")
     print("==================================================================")
 
-    file_path = "D:/apps/com.spotify.client-9.1.94-eeveedecrypter/InstagramReverb/InstagramReverbUI.m"
+    file_path = os.path.join(BASE_DIR, "InstagramDash1440pUI.m")
     with open(file_path, "r", encoding="utf-8") as f:
         code = f.read()
 

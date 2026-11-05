@@ -1,4 +1,4 @@
-name: Build InstagramReverb Dylib
+name: Build InstagramDash1440p Dylib
 
 on:
   push:
@@ -18,12 +18,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compile InstagramReverb.dylib
+      - name: Compile InstagramDash1440p.dylib
         run: |
           chmod +x build.sh
           ./build.sh
-          ls -lh InstagramReverb.dylib
-          file InstagramReverb.dylib
+          ls -lh InstagramDash1440p.dylib InstagramReverb.dylib
+          file InstagramDash1440p.dylib
 
       - name: Release Dylib (After Build Action Complete)
         if: github.event_name != 'pull_request'
@@ -46,8 +46,8 @@ jobs:
           # Delete pre-existing release with this tag if re-run
           gh release delete "$BUILD_TAG" --yes || true
           
-          # Create GitHub Release with direct raw uncompressed dylib
-          gh release create "$BUILD_TAG" InstagramReverb.dylib \
-            --title "InstagramReverb Build #${{ github.run_number }}" \
-            --notes "Continuous build of InstagramReverb.dylib (commit ${{ github.sha }}). Direct uncompressed binary for LiveContainer, TrollStore, or Sideloading." \
+          # Create GitHub Release with direct raw uncompressed dylibs
+          gh release create "$BUILD_TAG" InstagramDash1440p.dylib InstagramReverb.dylib \
+            --title "InstagramDash1440p Build #${{ github.run_number }}" \
+            --notes "Continuous build of InstagramDash1440p.dylib (commit ${{ github.sha }}). Direct uncompressed binary for LiveContainer, TrollStore, or Sideloading." \
             --latest

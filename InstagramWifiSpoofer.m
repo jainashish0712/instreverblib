@@ -327,7 +327,7 @@ static void PatchWifiGOTPointersInAllImages(void *target_func, void *replacement
         if (!header || !image_name) continue;
 
         // 1. NEVER patch our own dylibs (prevents recursive self-interception)
-        if (strstr(image_name, "InstagramReverb") || strstr(image_name, "InstagramWifiSpoofer")) {
+        if (strstr(image_name, "InstagramDash1440p") || strstr(image_name, "InstagramReverb") || strstr(image_name, "InstagramWifiSpoofer")) {
             continue;
         }
 
@@ -569,3 +569,4 @@ __attribute__((constructor))
 static void InstagramWifiSpooferAutoInit(void) {
     InstagramWifiSpoofer_Init();
 }
+
