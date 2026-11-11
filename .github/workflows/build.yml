@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -31,21 +31,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BUILD_TAG="v${{ github.run_number }}"
-          
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
+
           # Tag this specific build
           git tag -f "$BUILD_TAG" HEAD
           git push origin -f tag "$BUILD_TAG" || true
-          
+
           # Also update rolling latest tag
           git tag -f latest HEAD
           git push origin -f tag latest || true
-          
+
           # Delete pre-existing release with this tag if re-run
           gh release delete "$BUILD_TAG" --yes || true
-          
+
           # Create GitHub Release with direct raw uncompressed dylibs
           gh release create "$BUILD_TAG" InstagramDash1440p.dylib InstagramReverb.dylib \
             --title "InstagramDash1440p Build #${{ github.run_number }}" \
