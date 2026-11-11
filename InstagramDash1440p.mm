@@ -23,6 +23,21 @@ static NSString *g_currentQuality = @"1440p";
 static NSString *g_currentResolution = @"";
 static NSString *g_currentRepresentationId = @"ready";
 static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
+static char g_docLogPath[1024] = {0};
+
+static void ResolveLogPath(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *docDir = paths.firstObject;
+        if (docDir) {
+            NSString *logPath = [docDir stringByAppendingPathComponent:@"InstagramDash1440p.log"];
+            snprintf(g_docLogPath, sizeof(g_docLogPath), "%s", [logPath UTF8String] ?: "/tmp/InstagramDash1440p.log");
+        } else {
+            snprintf(g_docLogPath, sizeof(g_docLogPath), "/tmp/InstagramDash1440p.log");
+        }
+    });
+}
 
 // ============================================================================
 // Zero-Overhead Logging Stub (Disabled for Stutter-Free 1440p Playback)
