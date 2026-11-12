@@ -210,6 +210,7 @@ static uint64_t GetRepresentationBitrate(id rep) {
     return 0;
 }
 
+
 static NSString *GetRepresentationId(id rep) {
     if (!rep) return nil;
     id actual = ExtractRepresentationFromObject(rep);
