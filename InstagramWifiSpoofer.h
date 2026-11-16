@@ -27,6 +27,9 @@ void InstagramWifiSpoofer_Init(void);
 // Returns YES if the spoofer is currently active
 BOOL InstagramWifiSpoofer_IsActive(void);
 
+// Programmatically enable or disable Wi-Fi spoofing (e.g. deactivated in Disabled mode)
+void InstagramWifiSpoofer_SetEnabled(BOOL enabled);
+
 // Returns YES if the underlying physical network connection is Cellular Data (WWAN)
 BOOL InstagramWifiSpoofer_IsCellularData(void);
 

@@ -225,6 +225,9 @@ static Boolean My_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target,
     if (orig_SCNetworkReachabilityGetFlags) {
         res = orig_SCNetworkReachabilityGetFlags(target, flags);
     }
+    if (!InstagramWifiSpoofer_IsActive()) {
+        return res;
+    }
     if (flags) {
         // 1. Strip WWAN cellular bit: 1 << 18 (0x40000)
         *flags &= ~((SCNetworkReachabilityFlags)kSCNetworkReachabilityFlagsIsWWAN);
@@ -240,6 +243,9 @@ static Boolean My_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target,
 
 static int My_getifaddrs(struct ifaddrs **ifap) {
     int res = orig_getifaddrs ? orig_getifaddrs(ifap) : -1;
+    if (!InstagramWifiSpoofer_IsActive()) {
+        return res;
+    }
     if (res == 0 && ifap && *ifap) {
         for (struct ifaddrs *ifa = *ifap; ifa != NULL; ifa = ifa->ifa_next) {
             if (ifa->ifa_name && strncmp(ifa->ifa_name, "pdp_ip", 6) == 0) {
@@ -265,16 +271,25 @@ static int (*orig_nw_path_get_status)(void *path) = NULL;
 static int My_nw_interface_get_type(void *interface) {
     if (orig_nw_interface_get_type) {
         int t = orig_nw_interface_get_type(interface);
+        if (!InstagramWifiSpoofer_IsActive()) {
+            return t;
+        }
         // 2 = nw_interface_type_cellular -> remap to 1 = nw_interface_type_wifi
         if (t == 2) {
             return 1;
         }
         return t;
     }
-    return 1;
+    return InstagramWifiSpoofer_IsActive() ? 1 : 0;
 }
 
 static bool My_nw_path_uses_interface_type(void *path, int type) {
+    if (!InstagramWifiSpoofer_IsActive()) {
+        if (orig_nw_path_uses_interface_type) {
+            return orig_nw_path_uses_interface_type(path, type);
+        }
+        return false;
+    }
     // 1 = nw_interface_type_wifi
     if (type == 1) {
         return true;
@@ -290,20 +305,44 @@ static bool My_nw_path_uses_interface_type(void *path, int type) {
 }
 
 static bool My_nw_path_is_expensive(void *path) {
+    if (!InstagramWifiSpoofer_IsActive()) {
+        if (orig_nw_path_is_expensive) {
+            return orig_nw_path_is_expensive(path);
+        }
+        return false;
+    }
     // Wi-Fi connection is unmetered and never expensive
     return false;
 }
 
 static bool My_nw_path_is_constrained(void *path) {
+    if (!InstagramWifiSpoofer_IsActive()) {
+        if (orig_nw_path_is_constrained) {
+            return orig_nw_path_is_constrained(path);
+        }
+        return false;
+    }
     // Low Data Mode is never active
     return false;
 }
 
 static bool My_nw_path_is_ultra_constrained(void *path) {
+    if (!InstagramWifiSpoofer_IsActive()) {
+        if (orig_nw_path_is_ultra_constrained) {
+            return orig_nw_path_is_ultra_constrained(path);
+        }
+        return false;
+    }
     return false;
 }
 
 static int My_nw_path_get_status(void *path) {
+    if (!InstagramWifiSpoofer_IsActive()) {
+        if (orig_nw_path_get_status) {
+            return orig_nw_path_get_status(path);
+        }
+        return 1;
+    }
     // 1 = nw_path_status_satisfied
     return 1;
 }
@@ -508,8 +547,20 @@ void InstagramWifiSpoofer_Init(void) {
     });
 }
 
+static BOOL g_spooferEnabled = YES;
+static pthread_mutex_t g_spooferMutex = PTHREAD_MUTEX_INITIALIZER;
+
 BOOL InstagramWifiSpoofer_IsActive(void) {
-    return YES;
+    pthread_mutex_lock(&g_spooferMutex);
+    BOOL active = g_spooferEnabled;
+    pthread_mutex_unlock(&g_spooferMutex);
+    return active;
+}
+
+void InstagramWifiSpoofer_SetEnabled(BOOL enabled) {
+    pthread_mutex_lock(&g_spooferMutex);
+    g_spooferEnabled = enabled;
+    pthread_mutex_unlock(&g_spooferMutex);
 }
 
 int InstagramWifiSpoofer_GetRawIfAddrs(struct ifaddrs **ifap) {
