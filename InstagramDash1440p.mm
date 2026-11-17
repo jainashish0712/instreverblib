@@ -160,7 +160,7 @@ static id ExtractRepresentationFromObject(id obj) {
     }
 
     // Check selection metadata wrappers
-    SEL selectors[] = {
+    static const SEL selectors[] = {
         sel_registerName("selectedRepresentation"),
         sel_registerName("selectedRep"),
         sel_registerName("representation"),
@@ -177,10 +177,10 @@ static id ExtractRepresentationFromObject(id obj) {
     }
 
     // Safe KVC fallback
-    const char *keys[] = {"selectedRepresentation", "selectedRep", "representation", "videoRepresentation"};
+    static NSString * const keys[] = {@"selectedRepresentation", @"selectedRep", @"representation", @"videoRepresentation"};
     for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
         @try {
-            id inner = [obj valueForKey:[NSString stringWithUTF8String:keys[i]]];
+            id inner = [obj valueForKey:keys[i]];
             if (inner && inner != obj) {
                 id extracted = ExtractRepresentationFromObject(inner);
                 if (extracted) return extracted;
@@ -286,7 +286,7 @@ static NSString *GetRepresentationQualityLabel(id rep) {
     id actual = ExtractRepresentationFromObject(rep);
     if (!actual) actual = rep;
 
-    SEL selectors[] = {
+    static const SEL selectors[] = {
         sel_registerName("qualityLabel"),
         sel_registerName("FBQualityLabel"),
         sel_registerName("quality"),
@@ -302,10 +302,10 @@ static NSString *GetRepresentationQualityLabel(id rep) {
             } @catch (...) {}
         }
     }
-    const char *keys[] = {"qualityLabel", "FBQualityLabel", "quality"};
+    static NSString * const keys[] = {@"qualityLabel", @"FBQualityLabel", @"quality"};
     for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
         @try {
-            id val = [actual valueForKey:[NSString stringWithUTF8String:keys[i]]];
+            id val = [actual valueForKey:keys[i]];
             if (val && [val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) {
                 return (NSString *)val;
             }
@@ -382,12 +382,18 @@ static void CacheRepresentationMetadata(id rep) {
     NSString *repId = GetRepresentationId(actual);
     if (!repId || repId.length == 0) return;
 
+    // Fast-path: Check if already cached under lock to avoid re-allocating identical NSDictionary
+    pthread_mutex_lock(&g_cacheMutex);
+    if (g_repMetadataCache && g_repMetadataCache[repId]) {
+        pthread_mutex_unlock(&g_cacheMutex);
+        return;
+    }
+
     CGSize sz = GetRepresentationPixelDimensions(actual);
     NSString *tag = GetRepresentationEncodingTag(actual) ?: @"";
     NSString *qLabel = GetRepresentationQualityLabel(actual) ?: @"";
     uint64_t bw = GetRepresentationBitrate(actual);
 
-    pthread_mutex_lock(&g_cacheMutex);
     if (!g_repMetadataCache) {
         g_repMetadataCache = [[NSMutableDictionary alloc] init];
     }
@@ -526,6 +532,13 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
         return nil;
     }
 
+    // Fast-path: If already a single-element representation array, return immediately
+    if (representations.count == 1) {
+        id single = representations.firstObject;
+        CacheRepresentationMetadata(single);
+        return single;
+    }
+
     InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
     if (mode == InstagramDash1440pMode_Disabled) {
         return representations.firstObject;
@@ -548,19 +561,28 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
     for (id rep in representations) {
         if (!rep || IsAudioRepresentation(rep)) continue;
 
-        // Cache metadata for reliable on-screen active telemetry resolution
-        CacheRepresentationMetadata(rep);
-
         CGSize sz = GetRepresentationPixelDimensions(rep);
         uint64_t pixels = (uint64_t)(sz.width * sz.height);
         uint64_t bw = GetRepresentationBitrate(rep);
         NSString *repId = GetRepresentationId(rep);
         NSString *encodingTag = GetRepresentationEncodingTag(rep);
         NSString *qualityLabel = GetRepresentationQualityLabel(rep);
-        NSString *desc = [rep respondsToSelector:@selector(description)] ? [rep description] : @"";
 
-        BOOL is1440 = IsRepresentation1440p(sz.width, sz.height, repId, encodingTag, qualityLabel, bw, desc);
-        BOOL is1080 = !is1440 && IsRepresentation1080p(sz.width, sz.height, repId, encodingTag, qualityLabel, desc);
+        // Fast lightweight check first (zero description formatting)
+        BOOL is1440 = IsRepresentation1440p(sz.width, sz.height, repId, encodingTag, qualityLabel, bw, nil);
+        if (!is1440 && [rep respondsToSelector:@selector(description)]) {
+            NSString *desc = [rep description];
+            is1440 = IsRepresentation1440p(sz.width, sz.height, repId, encodingTag, qualityLabel, bw, desc);
+        }
+
+        BOOL is1080 = NO;
+        if (!is1440) {
+            is1080 = IsRepresentation1080p(sz.width, sz.height, repId, encodingTag, qualityLabel, nil);
+            if (!is1080 && [rep respondsToSelector:@selector(description)]) {
+                NSString *desc = [rep description];
+                is1080 = IsRepresentation1080p(sz.width, sz.height, repId, encodingTag, qualityLabel, desc);
+            }
+        }
 
         DashLog(@"[Quality Selector] Candidate rep: %@ (%@, %.0fx%.0f, %llu bps, is1440=%d, is1080=%d)",
                 repId, encodingTag, sz.width, sz.height, bw, is1440, is1080);
@@ -619,6 +641,12 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
     } else {
         chosen = representations.firstObject;
     }
+
+    // Cache metadata ONLY for the chosen representation (avoids churning 10 dictionaries per query)
+    if (chosen) {
+        CacheRepresentationMetadata(chosen);
+    }
+
     return chosen;
 }
 
@@ -662,7 +690,7 @@ static id WrapOrUpdateSelectionMetadata(id originalSelection, id targetRep) {
     if (originalSelection == targetRep) return originalSelection;
 
     BOOL isWrapper = NO;
-    SEL getterSelectors[] = {
+    static const SEL getterSelectors[] = {
         sel_registerName("selectedRepresentation"),
         sel_registerName("selectedRep"),
         sel_registerName("representation"),
@@ -679,7 +707,7 @@ static id WrapOrUpdateSelectionMetadata(id originalSelection, id targetRep) {
         return targetRep;
     }
 
-    SEL setterSelectors[] = {
+    static const SEL setterSelectors[] = {
         sel_registerName("setSelectedRepresentation:"),
         sel_registerName("setSelectedRep:"),
         sel_registerName("setRepresentation:"),
@@ -697,10 +725,10 @@ static id WrapOrUpdateSelectionMetadata(id originalSelection, id targetRep) {
     }
 
     if (!set) {
-        const char *keys[] = {"selectedRepresentation", "selectedRep", "representation", "videoRepresentation"};
+        static NSString * const keys[] = {@"selectedRepresentation", @"selectedRep", @"representation", @"videoRepresentation"};
         for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
             @try {
-                [originalSelection setValue:targetRep forKey:[NSString stringWithUTF8String:keys[i]]];
+                [originalSelection setValue:targetRep forKey:keys[i]];
                 set = YES;
                 break;
             } @catch (...) {}
@@ -1009,6 +1037,18 @@ static OSStatus Hook_VTDecompressionSessionCreate(
             allocator,
             videoFormatDescription,
             decoderSpec ? decoderSpec : videoDecoderSpecification,
+            destinationImageBufferAttributes,
+            outputCallback,
+            decompressionSessionOut);
+    }
+
+    // Resilient fallback: If forcing hardware decoder fails, retry with original specification
+    // to prevent VideoToolbox from failing completely and dropping into software CPU decoding
+    if (status != noErr && decoderSpec && orig_VTDecompressionSessionCreate) {
+        status = orig_VTDecompressionSessionCreate(
+            allocator,
+            videoFormatDescription,
+            videoDecoderSpecification,
             destinationImageBufferAttributes,
             outputCallback,
             decompressionSessionOut);
