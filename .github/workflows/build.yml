@@ -2,9 +2,20 @@ name: Build InstagramReverb Dylib
 
 on:
   push:
-    branches: [ main, master, dev,1440p-try-2, "**" ]
-  pull_request:
+    branches: [ "**" ]
+    paths:
+      - '**.m'
+      - '**.mm'
+      - '**.h'
+      - '**.c'
+      - 'build.sh'
+      - 'Makefile'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -12,6 +23,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
