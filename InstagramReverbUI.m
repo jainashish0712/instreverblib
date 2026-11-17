@@ -489,14 +489,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 @property (nonatomic, strong) UILabel *roomValLabel;
 @property (nonatomic, strong) UISlider *roomSlider;
 
-// 4. System Volume Controls
-@property (nonatomic, strong) UILabel *volumeTitleLabel;
-@property (nonatomic, strong) UIButton *volumeMinusBtn;
-@property (nonatomic, strong) UIButton *volumePlusBtn;
-@property (nonatomic, strong) UILabel *volumeValLabel;
-@property (nonatomic, strong) MPVolumeView *volumeView;
-
-// 5. Reset Defaults Button
+// 4. Reset Defaults Button
 @property (nonatomic, strong) UIButton *resetBtn;
 @property (nonatomic, copy) void (^closeHandler)(void);
 
@@ -509,7 +502,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.layer.cornerRadius = 14.0f;
+        self.layer.cornerRadius = 12.0f;
         self.layer.masksToBounds = YES;
         self.layer.borderWidth = 0.5f;
         self.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.18f].CGColor;
@@ -529,37 +522,40 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         _contentContainer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [self addSubview:_contentContainer];
 
-        // Header: Scaled compact title + toggle + close
+        // Header: Scaled compact title + centered close + toggle
         _titleLabel = [[UILabel alloc] init];
         _titleLabel.text = @"Reverb & Pitch";
-        _titleLabel.font = [UIFont boldSystemFontOfSize:11.5f];
+        _titleLabel.font = [UIFont boldSystemFontOfSize:10.5f];
         _titleLabel.textColor = [UIColor whiteColor];
+        _titleLabel.adjustsFontSizeToFitWidth = YES;
+        _titleLabel.minimumScaleFactor = 0.8f;
         [_contentContainer addSubview:_titleLabel];
-
-        _enableSwitch = [[UISwitch alloc] init];
-        _enableSwitch.onTintColor = ACCENT_COLOR;
-        _enableSwitch.transform = CGAffineTransformMakeScale(0.58f, 0.58f);
-        [_enableSwitch addTarget:self action:@selector(enableToggled:) forControlEvents:UIControlEventValueChanged];
-        [_contentContainer addSubview:_enableSwitch];
 
         _closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
         [_closeBtn setTitle:@"✕" forState:UIControlStateNormal];
         _closeBtn.titleLabel.font = [UIFont systemFontOfSize:13.0f weight:UIFontWeightMedium];
+        _closeBtn.titleLabel.textAlignment = NSTextAlignmentCenter;
         [_closeBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
         [_closeBtn addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
         [_contentContainer addSubview:_closeBtn];
+
+        _enableSwitch = [[UISwitch alloc] init];
+        _enableSwitch.onTintColor = ACCENT_COLOR;
+        _enableSwitch.transform = CGAffineTransformMakeScale(0.55f, 0.55f);
+        [_enableSwitch addTarget:self action:@selector(enableToggled:) forControlEvents:UIControlEventValueChanged];
+        [_contentContainer addSubview:_enableSwitch];
 
         _separator = [[UIView alloc] init];
         _separator.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.12f];
         [_contentContainer addSubview:_separator];
 
-        // Sleek compact 11pt slider thumbs
-        UIImage *thumb = CreateCompactThumb(11.0f);
+        // Sleek compact 10pt slider thumbs
+        UIImage *thumb = CreateCompactThumb(10.0f);
 
-        // 1. Pitch Shift Row (-4.0 to +4.0 in 0.2 intervals)
+        // 1. Pitch Shift Row (-4.0 to +4.0 in 0.2 intervals, default -0.4 st)
         _pitchTitleLabel = [[UILabel alloc] init];
         _pitchTitleLabel.text = @"Pitch";
-        _pitchTitleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightMedium];
+        _pitchTitleLabel.font = [UIFont systemFontOfSize:9.0f weight:UIFontWeightMedium];
         _pitchTitleLabel.textColor = [UIColor whiteColor];
         [_contentContainer addSubview:_pitchTitleLabel];
 
@@ -573,24 +569,24 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
         _pitchValLabel = [[UILabel alloc] init];
         _pitchValLabel.textAlignment = NSTextAlignmentRight;
-        _pitchValLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightRegular];
+        _pitchValLabel.font = [UIFont systemFontOfSize:9.0f weight:UIFontWeightRegular];
         _pitchValLabel.textColor = [UIColor colorWithWhite:0.85f alpha:1.0f];
         [_contentContainer addSubview:_pitchValLabel];
 
         _pitchSlider = [[UISlider alloc] init];
         _pitchSlider.minimumValue = -4.0f;
         _pitchSlider.maximumValue = 4.0f;
-        _pitchSlider.value = 0.0f;
+        _pitchSlider.value = -0.4f;
         _pitchSlider.minimumTrackTintColor = ACCENT_COLOR;
         [_pitchSlider setThumbImage:thumb forState:UIControlStateNormal];
         [_pitchSlider setThumbImage:thumb forState:UIControlStateHighlighted];
         [_pitchSlider addTarget:self action:@selector(pitchChanged:) forControlEvents:UIControlEventValueChanged];
         [_contentContainer addSubview:_pitchSlider];
 
-        // 2. Reverb Mix Row (0% to 100% in 8% intervals)
+        // 2. Reverb Mix Row (0% to 100% in 8% intervals, default 42% wet / 58% dry)
         _mixTitleLabel = [[UILabel alloc] init];
         _mixTitleLabel.text = @"Reverb";
-        _mixTitleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightMedium];
+        _mixTitleLabel.font = [UIFont systemFontOfSize:9.0f weight:UIFontWeightMedium];
         _mixTitleLabel.textColor = [UIColor whiteColor];
         [_contentContainer addSubview:_mixTitleLabel];
 
@@ -604,7 +600,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
         _mixValLabel = [[UILabel alloc] init];
         _mixValLabel.textAlignment = NSTextAlignmentRight;
-        _mixValLabel.font = [UIFont systemFontOfSize:9.0f weight:UIFontWeightRegular];
+        _mixValLabel.font = [UIFont systemFontOfSize:8.5f weight:UIFontWeightRegular];
         _mixValLabel.textColor = [UIColor colorWithWhite:0.85f alpha:1.0f];
         _mixValLabel.adjustsFontSizeToFitWidth = YES;
         _mixValLabel.minimumScaleFactor = 0.75f;
@@ -613,17 +609,17 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         _mixSlider = [[UISlider alloc] init];
         _mixSlider.minimumValue = 0.0f;
         _mixSlider.maximumValue = 1.0f;
-        _mixSlider.value = 0.35f;
+        _mixSlider.value = 0.42f;
         _mixSlider.minimumTrackTintColor = ACCENT_COLOR;
         [_mixSlider setThumbImage:thumb forState:UIControlStateNormal];
         [_mixSlider setThumbImage:thumb forState:UIControlStateHighlighted];
         [_mixSlider addTarget:self action:@selector(mixChanged:) forControlEvents:UIControlEventValueChanged];
         [_contentContainer addSubview:_mixSlider];
 
-        // 3. Room Size Row (0.10 to 0.98 in 0.08 intervals)
+        // 3. Room Size Row (0.10 to 0.98 in 0.08 intervals, default 0.65)
         _roomTitleLabel = [[UILabel alloc] init];
         _roomTitleLabel.text = @"Room";
-        _roomTitleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightMedium];
+        _roomTitleLabel.font = [UIFont systemFontOfSize:9.0f weight:UIFontWeightMedium];
         _roomTitleLabel.textColor = [UIColor whiteColor];
         [_contentContainer addSubview:_roomTitleLabel];
 
@@ -637,58 +633,27 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 
         _roomValLabel = [[UILabel alloc] init];
         _roomValLabel.textAlignment = NSTextAlignmentRight;
-        _roomValLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightRegular];
+        _roomValLabel.font = [UIFont systemFontOfSize:9.0f weight:UIFontWeightRegular];
         _roomValLabel.textColor = [UIColor colorWithWhite:0.85f alpha:1.0f];
         [_contentContainer addSubview:_roomValLabel];
 
         _roomSlider = [[UISlider alloc] init];
         _roomSlider.minimumValue = 0.1f;
         _roomSlider.maximumValue = 0.98f;
-        _roomSlider.value = 0.82f;
+        _roomSlider.value = 0.65f;
         _roomSlider.minimumTrackTintColor = ACCENT_COLOR;
         [_roomSlider setThumbImage:thumb forState:UIControlStateNormal];
         [_roomSlider setThumbImage:thumb forState:UIControlStateHighlighted];
         [_roomSlider addTarget:self action:@selector(roomChanged:) forControlEvents:UIControlEventValueChanged];
         [_contentContainer addSubview:_roomSlider];
 
-        // 4. System Volume Row (0% to 100% in 7% intervals)
-        _volumeTitleLabel = [[UILabel alloc] init];
-        _volumeTitleLabel.text = @"Volume";
-        _volumeTitleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightMedium];
-        _volumeTitleLabel.textColor = [UIColor whiteColor];
-        [_contentContainer addSubview:_volumeTitleLabel];
-
-        _volumeMinusBtn = CreateTinyStepButton(@"-");
-        [_volumeMinusBtn addTarget:self action:@selector(volumeMinusTapped) forControlEvents:UIControlEventTouchUpInside];
-        [_contentContainer addSubview:_volumeMinusBtn];
-
-        _volumePlusBtn = CreateTinyStepButton(@"+");
-        [_volumePlusBtn addTarget:self action:@selector(volumePlusTapped) forControlEvents:UIControlEventTouchUpInside];
-        [_contentContainer addSubview:_volumePlusBtn];
-
-        _volumeValLabel = [[UILabel alloc] init];
-        _volumeValLabel.textAlignment = NSTextAlignmentRight;
-        _volumeValLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightRegular];
-        _volumeValLabel.textColor = [UIColor colorWithWhite:0.85f alpha:1.0f];
-        [_contentContainer addSubview:_volumeValLabel];
-
-        _volumeView = [[MPVolumeView alloc] init];
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        _volumeView.showsRouteButton = NO;
-#pragma clang diagnostic pop
-        _volumeView.tintColor = ACCENT_COLOR;
-        [_volumeView setVolumeThumbImage:thumb forState:UIControlStateNormal];
-        [_volumeView setVolumeThumbImage:thumb forState:UIControlStateHighlighted];
-        [_contentContainer addSubview:_volumeView];
-
-        // 5. Reset Defaults Button (Compact)
+        // 4. Reset Defaults Button (Compact, snug at bottom)
         _resetBtn = [UIButton buttonWithType:UIButtonTypeSystem];
         [_resetBtn setTitle:@"Reset to Defaults" forState:UIControlStateNormal];
         [_resetBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
-        _resetBtn.titleLabel.font = [UIFont systemFontOfSize:9.5f weight:UIFontWeightMedium];
+        _resetBtn.titleLabel.font = [UIFont systemFontOfSize:9.0f weight:UIFontWeightMedium];
         _resetBtn.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.07f];
-        _resetBtn.layer.cornerRadius = 5.0f;
+        _resetBtn.layer.cornerRadius = 4.5f;
         [_resetBtn addTarget:self action:@selector(resetTapped) forControlEvents:UIControlEventTouchUpInside];
         [_contentContainer addSubview:_resetBtn];
 
@@ -705,9 +670,7 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
     // Let sliders, buttons, and switches handle their own touches directly
     if ([touch.view isKindOfClass:[UIControl class]] ||
-        [touch.view.superview isKindOfClass:[UIControl class]] ||
-        [touch.view isKindOfClass:[MPVolumeView class]] ||
-        [touch.view.superview isKindOfClass:[MPVolumeView class]]) {
+        [touch.view.superview isKindOfClass:[UIControl class]]) {
         return NO;
     }
     return YES;
@@ -744,31 +707,40 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     _blurView.frame = self.bounds;
     _contentContainer.frame = self.bounds;
 
-    CGFloat pad = 10.0f;
+    CGFloat pad = 8.0f;
     CGFloat w = self.bounds.size.width - (pad * 2.0f);
+    CGFloat hudWidth = self.bounds.size.width;
 
-    // Header (y = 8.0f)
-    CGFloat y = 8.0f;
-    _titleLabel.frame = CGRectMake(pad, y, w - 55.0f, 20.0f);
-    _enableSwitch.center = CGPointMake(self.bounds.size.width - pad - 34.0f, y + 10.0f);
-    _closeBtn.frame = CGRectMake(self.bounds.size.width - pad - 16.0f, y, 16.0f, 20.0f);
+    // Header (y = 7.0f, h = 20.0f)
+    CGFloat y = 7.0f;
+    CGFloat headerH = 20.0f;
+    CGFloat centerX = hudWidth / 2.0f;
 
-    y += 24.0f;
+    // Close button '✕' placed in the exact center
+    _closeBtn.frame = CGRectMake(centerX - 10.0f, y, 20.0f, headerH);
+
+    // Title label on the left (pad to just before close button)
+    _titleLabel.frame = CGRectMake(pad, y, (centerX - 12.0f) - pad, headerH);
+
+    // Switch on the right
+    _enableSwitch.center = CGPointMake(hudWidth - pad - 18.0f, y + (headerH / 2.0f));
+
+    y += headerH + 3.0f;
     _separator.frame = CGRectMake(pad, y, w, 0.5f);
-    y += 5.0f;
+    y += 4.5f;
 
-    CGFloat rowH = 15.0f;
-    CGFloat sliderH = 16.0f;
+    CGFloat rowH = 14.0f;
+    CGFloat sliderH = 14.0f;
     CGFloat rowSpacing = 2.0f;
-    CGFloat blockGap = 5.0f;
+    CGFloat blockGap = 4.0f;
 
-    CGFloat labelW = 40.0f;
-    CGFloat btnW = 15.0f;
-    CGFloat btnH = 14.0f;
-    CGFloat btnGap = 3.0f;
-    CGFloat minusX = pad + labelW + 2.0f;
+    CGFloat labelW = 32.0f;
+    CGFloat btnW = 14.0f;
+    CGFloat btnH = 13.0f;
+    CGFloat btnGap = 2.5f;
+    CGFloat minusX = pad + labelW + 1.0f;
     CGFloat plusX = minusX + btnW + btnGap;
-    CGFloat valX = plusX + btnW + 4.0f;
+    CGFloat valX = plusX + btnW + 3.0f;
     CGFloat valW = (pad + w) - valX;
 
     // 1. Pitch Shift Row
@@ -796,62 +768,30 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     _roomValLabel.frame = CGRectMake(valX, y, valW, rowH);
     y += rowH + rowSpacing;
     _roomSlider.frame = CGRectMake(pad, y, w, sliderH);
-    y += sliderH + blockGap;
+    y += sliderH + 5.0f;
 
-    // 4. System Volume Row
-    _volumeTitleLabel.frame = CGRectMake(pad, y, labelW, rowH);
-    _volumeMinusBtn.frame = CGRectMake(minusX, y + 0.5f, btnW, btnH);
-    _volumePlusBtn.frame = CGRectMake(plusX, y + 0.5f, btnW, btnH);
-    _volumeValLabel.frame = CGRectMake(valX, y, valW, rowH);
-    y += rowH + rowSpacing;
-    _volumeView.frame = CGRectMake(pad, y, w, sliderH);
-    y += sliderH + 6.0f;
-
-    // Ensure volume subview slider has correct compact thumb, tint, and touch listener
-    UIImage *thumb = CreateCompactThumb(11.0f);
-    for (UIView *sub in _volumeView.subviews) {
-        if ([sub isKindOfClass:[UISlider class]]) {
-            UISlider *volSlider = (UISlider *)sub;
-            volSlider.tintColor = ACCENT_COLOR;
-            [volSlider setThumbImage:thumb forState:UIControlStateNormal];
-            [volSlider setThumbImage:thumb forState:UIControlStateHighlighted];
-            [volSlider removeTarget:self action:@selector(volumeSliderChanged:) forControlEvents:UIControlEventValueChanged];
-            [volSlider addTarget:self action:@selector(volumeSliderChanged:) forControlEvents:UIControlEventValueChanged];
-        }
-    }
-
-    // 5. Reset Defaults Button
-    _resetBtn.frame = CGRectMake(pad, y, w, 22.0f);
+    // 4. Reset Defaults Button (Compact, snug at bottom with 0 dead gap)
+    _resetBtn.frame = CGRectMake(pad, y, w, 20.0f);
 }
 
 - (void)refreshValues {
     self.enableSwitch.on = InstagramReverb_IsEnabled();
 
-    // Pitch (-4.0 to +4.0 in 0.2 intervals)
+    // Pitch (-4.0 to +4.0 in 0.2 intervals, default -0.4 st)
     float pitch = InstagramReverb_GetPitch();
     self.pitchSlider.value = pitch;
     self.pitchValLabel.text = (fabsf(pitch) < 0.01f) ? @"0.0 st" : [NSString stringWithFormat:@"%+0.1f st", pitch];
 
-    // Wet / Dry (strictly 100% complementary: dry% + wet% = 100%)
+    // Wet / Dry (strictly 100% complementary: dry% + wet% = 100%, default 42% wet / 58% dry)
     float wet = InstagramReverb_GetWet();
     float dry = 1.0f - wet;
     self.mixSlider.value = wet;
     self.mixValLabel.text = [NSString stringWithFormat:@"Dry %.0f%% / Wet %.0f%%", dry * 100.0f, wet * 100.0f];
 
-    // Room Size (0.10 to 0.98 in 0.08 intervals)
+    // Room Size (0.10 to 0.98 in 0.08 intervals, default 0.65)
     float room = InstagramReverb_GetRoomSize();
     self.roomSlider.value = room;
     self.roomValLabel.text = [NSString stringWithFormat:@"%.2f", room];
-
-    // Volume (0% to 100%)
-    float currentVol = 0.5f;
-    for (UIView *sub in self.volumeView.subviews) {
-        if ([sub isKindOfClass:[UISlider class]]) {
-            currentVol = ((UISlider *)sub).value;
-            break;
-        }
-    }
-    self.volumeValLabel.text = [NSString stringWithFormat:@"%.0f%%", currentVol * 100.0f];
 }
 
 // ----------------------------------------------------------------------------
@@ -941,35 +881,6 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 - (void)roomChanged:(UISlider *)sender {
     InstagramReverb_SetRoomSize(sender.value);
     self.roomValLabel.text = [NSString stringWithFormat:@"%.2f", sender.value];
-}
-
-// ----------------------------------------------------------------------------
-// System Volume: Slider & +/- Step (Interval: 7% / 0.07)
-// ----------------------------------------------------------------------------
-- (void)volumeStep:(float)delta {
-    for (UIView *sub in self.volumeView.subviews) {
-        if ([sub isKindOfClass:[UISlider class]]) {
-            UISlider *slider = (UISlider *)sub;
-            float newVol = fmaxf(0.0f, fminf(1.0f, slider.value + delta));
-            newVol = roundf(newVol * 100.0f) / 100.0f;
-            [slider setValue:newVol animated:YES];
-            [slider sendActionsForControlEvents:UIControlEventTouchUpInside];
-            self.volumeValLabel.text = [NSString stringWithFormat:@"%.0f%%", newVol * 100.0f];
-            break;
-        }
-    }
-}
-
-- (void)volumeMinusTapped {
-    [self volumeStep:-0.07f];
-}
-
-- (void)volumePlusTapped {
-    [self volumeStep:0.07f];
-}
-
-- (void)volumeSliderChanged:(UISlider *)sender {
-    self.volumeValLabel.text = [NSString stringWithFormat:@"%.0f%%", sender.value * 100.0f];
 }
 
 // ----------------------------------------------------------------------------
@@ -1584,12 +1495,12 @@ static NSString *FormatDataRate(double bytesPerSec) {
             [container bringSubviewToFront:self.floatingButton];
         }
 
-        // Separate Thin Vertical 70x20px Draggable System Volume Bar
+        // Separate Thin Vertical 70x20px Draggable System Volume Bar (Default Right-Hand Edge Position)
         if (!self.volumeBar) {
             CGFloat barW = 20.0f;
             CGFloat barH = 70.0f;
-            CGFloat initialX = 12.0f;
-            CGFloat initialY = 240.0f;
+            CGFloat initialX = container.bounds.size.width - barW - 14.0f;
+            CGFloat initialY = 280.0f;
             self.volumeBar = [[InstagramReverbVolumeBar alloc] initWithFrame:CGRectMake(initialX, initialY, barW, barH)];
             [container addSubview:self.volumeBar];
             [self.volumeBar updateFillForVolume:[self.volumeBar currentSystemVolume]];
@@ -1658,15 +1569,15 @@ static NSString *FormatDataRate(double bytesPerSec) {
 
         CGRect winBounds = container.bounds;
 
-        // Compact Half-Screen Mini-Widget Layout:
-        // Width ~196pt (strictly half of 393pt screen), docked to the bottom-right corner
+        // Compact Mini-Widget Layout:
+        // Reduced overall width (180pt) & reduced snug height (164pt, 0 dead gap underneath)
         CGFloat screenW = winBounds.size.width;
         CGFloat screenH = winBounds.size.height;
         CGFloat rightMargin = 10.0f;
-        CGFloat hudW = roundf(screenW * 0.50f); // Exactly half-screen width
-        CGFloat hudH = 220.0f;                 // Scaled-down compact height with +/- steppers
+        CGFloat hudW = 180.0f;
+        CGFloat hudH = 164.0f;
         CGFloat hudX = screenW - hudW - rightMargin; // Right-hand corner docked
-        CGFloat hudY = screenH - hudH - 95.0f;       // Bottom thumb sweep zone
+        CGFloat hudY = screenH - hudH - 100.0f;      // Bottom thumb sweep zone above tab bar
 
         if (!self.hudView) {
             self.hudView = [[InstagramReverbHUDView alloc] initWithFrame:CGRectMake(hudX, hudY, hudW, hudH)];

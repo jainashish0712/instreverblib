@@ -24,7 +24,7 @@ void InstagramReverb_SetWetDry(float wet, float dry);
 float InstagramReverb_GetWet(void);
 float InstagramReverb_GetDry(void);
 
-// Room Size API (0.10 to 0.98, default 0.82)
+// Room Size API (0.10 to 0.98, default 0.65)
 void InstagramReverb_SetRoomSize(float roomSize);
 float InstagramReverb_GetRoomSize(void);
 
