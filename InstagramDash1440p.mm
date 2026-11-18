@@ -400,6 +400,11 @@ static void CacheRepresentationMetadata(id rep) {
     if (!g_repMetadataCache) {
         g_repMetadataCache = [[NSMutableDictionary alloc] init];
     }
+    NSString *desc =
+        [actual respondsToSelector:@selector(description)]
+            ? [actual description]
+            : nil;
+
     BOOL is1440Cached = IsRepresentation1440p(
         sz.width,
         sz.height,
@@ -407,7 +412,7 @@ static void CacheRepresentationMetadata(id rep) {
         tag,
         qLabel,
         bw,
-        nil);
+        desc);
 
     BOOL is1080Cached =
         !is1440Cached &&
@@ -417,7 +422,7 @@ static void CacheRepresentationMetadata(id rep) {
             repId,
             tag,
             qLabel,
-            nil);
+            desc);
 
     g_repMetadataCache[repId] = @{
         @"width": @(sz.width),
