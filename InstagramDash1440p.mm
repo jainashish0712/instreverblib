@@ -1,3 +1,6 @@
+1440p-new
+
+
 // InstagramDash1440p.mm
 // Ultra High-Definition (1440p / 2K) VP9 DASH Video Streaming Engine for Instagram
 // Forces 1440p DASH video playback with strict 1080p fallback for active Reels & feed prefetchers
@@ -1378,6 +1381,26 @@ void InstagramDash1440p_Init(void) {
         HookVTDecompressionSessionCreateOnce();
         ApplyAllDash1440pSwizzles();
 
+                // Disable tweak while Instagram is backgrounded
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIApplicationDidEnterBackgroundNotification
+                        object:nil
+                        queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note) {
+
+            InstagramDash1440p_SetEnabled(NO);
+        }];
+
+        // Re-enable tweak when Instagram becomes active
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIApplicationDidBecomeActiveNotification
+                        object:nil
+                        queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note) {
+
+            InstagramDash1440p_SetEnabled(YES);
+        }];
+/*
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
                                                            object:nil
                                                             queue:[NSOperationQueue mainQueue]
@@ -1385,10 +1408,12 @@ void InstagramDash1440p_Init(void) {
             DashLog(@"UIApplicationDidFinishLaunchingNotification received, refreshing swizzles");
             ApplyAllDash1440pSwizzles();
         }];
-
+        */
+/*
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             ApplyAllDash1440pSwizzles();
         });
+        */
     });
 }
 
