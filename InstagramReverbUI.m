@@ -457,6 +457,169 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 @end
 
 // ============================================================================
+// Autonomous & Manual App Container Cache Cleaner Engine (Option C)
+// Automatically purges FNF video segments, image caches, and tmp files > 2 days
+// Executes non-blocking SQLite WAL checkpoints (PRAGMA wal_checkpoint(TRUNCATE))
+// ============================================================================
+
+void InstagramCacheCleaner_CheckpointDatabaseAtPath(NSString *dbPath) {
+    if (!dbPath || dbPath.length == 0) return;
+
+    typedef int (*sqlite3_open_v2_f)(const char *filename, void **ppDb, int flags, const char *zVfs);
+    typedef int (*sqlite3_exec_f)(void *db, const char *sql, int (*callback)(void*,int,char**,char**), void *arg, char **errmsg);
+    typedef int (*sqlite3_close_f)(void *db);
+
+    static sqlite3_open_v2_f s_sqlite3_open_v2 = NULL;
+    static sqlite3_exec_f s_sqlite3_exec = NULL;
+    static sqlite3_close_f s_sqlite3_close = NULL;
+    static dispatch_once_t s_sqliteOnce;
+
+    dispatch_once(&s_sqliteOnce, ^{
+        void *handle = dlopen("/usr/lib/libsqlite3.dylib", RTLD_LAZY | RTLD_GLOBAL);
+        if (!handle) handle = RTLD_DEFAULT;
+        s_sqlite3_open_v2 = (sqlite3_open_v2_f)dlsym(handle, "sqlite3_open_v2");
+        s_sqlite3_exec = (sqlite3_exec_f)dlsym(handle, "sqlite3_exec");
+        s_sqlite3_close = (sqlite3_close_f)dlsym(handle, "sqlite3_close");
+    });
+
+    if (!s_sqlite3_open_v2 || !s_sqlite3_exec || !s_sqlite3_close) return;
+
+    void *db = NULL;
+    // SQLITE_OPEN_READWRITE = 0x00000002
+    if (s_sqlite3_open_v2([dbPath UTF8String], &db, 0x00000002, NULL) == 0 && db) {
+        char *errmsg = NULL;
+        s_sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE);", NULL, NULL, &errmsg);
+        s_sqlite3_close(db);
+    }
+}
+
+void InstagramCacheCleaner_CheckpointSQLiteWAL(void) {
+    @autoreleasepool {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSArray *searchPaths = @[
+            NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject ?: @"",
+            NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject ?: @""
+        ];
+
+        for (NSString *dirPath in searchPaths) {
+            if (dirPath.length == 0 || ![fm fileExistsAtPath:dirPath]) continue;
+
+            NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:dirPath];
+            NSString *file = nil;
+            while ((file = [enumerator nextObject]) != nil) {
+                if ([file hasSuffix:@".db"]) {
+                    NSString *fullPath = [dirPath stringByAppendingPathComponent:file];
+                    NSString *walPath = [fullPath stringByAppendingString:@"-wal"];
+                    if ([fm fileExistsAtPath:walPath]) {
+                        InstagramCacheCleaner_CheckpointDatabaseAtPath(fullPath);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static uint64_t SweepDirectoryForStaleFiles(NSString *dirPath, NSTimeInterval minAgeSeconds, NSFileManager *fm, NSDate *now) {
+    if (!dirPath || dirPath.length == 0 || ![fm fileExistsAtPath:dirPath]) return 0;
+
+    uint64_t freed = 0;
+    NSError *error = nil;
+    NSArray *files = [fm contentsOfDirectoryAtPath:dirPath error:&error];
+    if (error || !files) return 0;
+
+    for (NSString *sub in files) {
+        NSString *fullPath = [dirPath stringByAppendingPathComponent:sub];
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:fullPath isDirectory:&isDir]) {
+            if (isDir) {
+                freed += SweepDirectoryForStaleFiles(fullPath, minAgeSeconds, fm, now);
+                NSArray *remaining = [fm contentsOfDirectoryAtPath:fullPath error:nil];
+                if (remaining && remaining.count == 0) {
+                    [fm removeItemAtPath:fullPath error:nil];
+                }
+            } else {
+                NSDictionary *attrs = [fm attributesOfItemAtPath:fullPath error:nil];
+                if (attrs) {
+                    NSDate *modDate = attrs[NSFileModificationDate];
+                    if (modDate && [now timeIntervalSinceDate:modDate] >= minAgeSeconds) {
+                        uint64_t size = [attrs fileSize];
+                        if ([fm removeItemAtPath:fullPath error:nil]) {
+                            freed += size;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return freed;
+}
+
+uint64_t InstagramCacheCleaner_PerformClean(NSTimeInterval minAgeSeconds) {
+    @autoreleasepool {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSDate *now = [NSDate date];
+        uint64_t totalFreed = 0;
+
+        // 1. Library/Caches paths
+        NSString *cachesDir = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+        if (cachesDir) {
+            NSArray *cacheTargets = @[
+                [cachesDir stringByAppendingPathComponent:@"com.burbn.instagram/VideoCache"],
+                [cachesDir stringByAppendingPathComponent:@"com.burbn.instagram/fsCachedData"],
+                [cachesDir stringByAppendingPathComponent:@"FNFVideoCache"],
+                [cachesDir stringByAppendingPathComponent:@"VideoCache"],
+                [cachesDir stringByAppendingPathComponent:@"FNF"],
+                [cachesDir stringByAppendingPathComponent:@"IGDiskCache"],
+                [cachesDir stringByAppendingPathComponent:@"WebKit"],
+                [cachesDir stringByAppendingPathComponent:@"com.burbn.instagram"]
+            ];
+
+            for (NSString *target in cacheTargets) {
+                totalFreed += SweepDirectoryForStaleFiles(target, minAgeSeconds, fm, now);
+            }
+        }
+
+        // 2. NSTemporaryDirectory()
+        NSString *tmpDir = NSTemporaryDirectory();
+        if (tmpDir) {
+            totalFreed += SweepDirectoryForStaleFiles(tmpDir, minAgeSeconds, fm, now);
+        }
+
+        return totalFreed;
+    }
+}
+
+static NSString *FormatByteCount(uint64_t bytes) {
+    if (bytes >= (1024ULL * 1024ULL * 1024ULL)) {
+        return [NSString stringWithFormat:@"%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0)];
+    } else if (bytes >= (1024ULL * 1024ULL)) {
+        return [NSString stringWithFormat:@"%.0f MB", bytes / (1024.0 * 1024.0)];
+    } else if (bytes >= 1024ULL) {
+        return [NSString stringWithFormat:@"%.0f KB", bytes / 1024.0];
+    } else {
+        return [NSString stringWithFormat:@"%llu B", bytes];
+    }
+}
+
+void InstagramCacheCleaner_StartAutonomousMaintenance(void) {
+    static NSTimeInterval s_lastAutoCleanTimestamp = 0;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+
+    // Debounce: only execute autonomous background maintenance at most once every 12 hours
+    if (s_lastAutoCleanTimestamp > 0 && (now - s_lastAutoCleanTimestamp) < (12.0 * 3600.0)) {
+        return;
+    }
+    s_lastAutoCleanTimestamp = now;
+
+    // Dispatch background maintenance after 4.0-second delay so app startup stays instantaneous
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        // 2 Days = 48 Hours = 172,800 Seconds
+        InstagramCacheCleaner_PerformClean(2.0 * 86400.0);
+        InstagramCacheCleaner_CheckpointSQLiteWAL();
+    });
+}
+
+// ============================================================================
 // Modal Reverb & Pitch HUD View (Compact Half-Screen Right-Hand Mini-Widget)
 // ============================================================================
 @interface InstagramReverbHUDView : UIView <UIGestureRecognizerDelegate>
@@ -489,8 +652,9 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 @property (nonatomic, strong) UILabel *roomValLabel;
 @property (nonatomic, strong) UISlider *roomSlider;
 
-// 4. Reset Defaults Button
+// 4. Action Buttons (Reset Defaults & Clean Cache)
 @property (nonatomic, strong) UIButton *resetBtn;
+@property (nonatomic, strong) UIButton *cleanCacheBtn;
 @property (nonatomic, copy) void (^closeHandler)(void);
 
 - (void)refreshValues;
@@ -647,15 +811,26 @@ static UIButton *CreateTinyStepButton(NSString *title) {
         [_roomSlider addTarget:self action:@selector(roomChanged:) forControlEvents:UIControlEventValueChanged];
         [_contentContainer addSubview:_roomSlider];
 
-        // 4. Reset Defaults Button (Compact, snug at bottom)
+        // 4. Action Buttons: Reset Defaults & Clean Cache (Side-by-side)
         _resetBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        [_resetBtn setTitle:@"Reset to Defaults" forState:UIControlStateNormal];
+        [_resetBtn setTitle:@"Reset Defaults" forState:UIControlStateNormal];
         [_resetBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
-        _resetBtn.titleLabel.font = [UIFont systemFontOfSize:9.0f weight:UIFontWeightMedium];
+        _resetBtn.titleLabel.font = [UIFont systemFontOfSize:8.5f weight:UIFontWeightMedium];
+        _resetBtn.titleLabel.adjustsFontSizeToFitWidth = YES;
         _resetBtn.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.07f];
         _resetBtn.layer.cornerRadius = 4.5f;
         [_resetBtn addTarget:self action:@selector(resetTapped) forControlEvents:UIControlEventTouchUpInside];
         [_contentContainer addSubview:_resetBtn];
+
+        _cleanCacheBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        [_cleanCacheBtn setTitle:@"Clean Cache" forState:UIControlStateNormal];
+        [_cleanCacheBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
+        _cleanCacheBtn.titleLabel.font = [UIFont systemFontOfSize:8.5f weight:UIFontWeightMedium];
+        _cleanCacheBtn.titleLabel.adjustsFontSizeToFitWidth = YES;
+        _cleanCacheBtn.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.07f];
+        _cleanCacheBtn.layer.cornerRadius = 4.5f;
+        [_cleanCacheBtn addTarget:self action:@selector(cleanCacheTapped) forControlEvents:UIControlEventTouchUpInside];
+        [_contentContainer addSubview:_cleanCacheBtn];
 
         // Draggable Pan Gesture for HUD (without interfering with sliders or buttons)
         UIPanGestureRecognizer *hudPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
@@ -770,8 +945,11 @@ static UIButton *CreateTinyStepButton(NSString *title) {
     _roomSlider.frame = CGRectMake(pad, y, w, sliderH);
     y += sliderH + 5.0f;
 
-    // 4. Reset Defaults Button (Compact, snug at bottom with 0 dead gap)
-    _resetBtn.frame = CGRectMake(pad, y, w, 20.0f);
+    // 4. Action Buttons: Reset Defaults & Clean Cache (Side-by-side, 20pt height, 0 dead gap)
+    CGFloat btnGap = 4.0f;
+    CGFloat halfBtnW = (w - btnGap) * 0.5f;
+    _resetBtn.frame = CGRectMake(pad, y, halfBtnW, 20.0f);
+    _cleanCacheBtn.frame = CGRectMake(pad + halfBtnW + btnGap, y, halfBtnW, 20.0f);
 }
 
 - (void)refreshValues {
@@ -889,6 +1067,40 @@ static UIButton *CreateTinyStepButton(NSString *title) {
 - (void)resetTapped {
     InstagramReverb_ResetDefaults();
     [self refreshValues];
+}
+
+- (void)cleanCacheTapped {
+    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [feedback impactOccurred];
+
+    [self.cleanCacheBtn setTitle:@"Cleaning..." forState:UIControlStateNormal];
+    self.cleanCacheBtn.enabled = NO;
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // Manual Clean: Purge files older than 10 minutes (600s) to keep actively playing reels safe
+        uint64_t freed = InstagramCacheCleaner_PerformClean(600.0);
+        InstagramCacheCleaner_CheckpointSQLiteWAL();
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+
+            NSString *freedStr = FormatByteCount(freed);
+            NSString *msg = (freed > (1024ULL * 1024ULL)) ? [NSString stringWithFormat:@"✓ %@", freedStr] : @"✓ Cleaned!";
+            [strongSelf.cleanCacheBtn setTitle:msg forState:UIControlStateNormal];
+            [strongSelf.cleanCacheBtn setTitleColor:ACCENT_COLOR forState:UIControlStateNormal];
+
+            UIImpactFeedbackGenerator *successFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+            [successFeedback impactOccurred];
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [strongSelf.cleanCacheBtn setTitle:@"Clean Cache" forState:UIControlStateNormal];
+                [strongSelf.cleanCacheBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
+                strongSelf.cleanCacheBtn.enabled = YES;
+            });
+        });
+    });
 }
 
 - (void)closeTapped {
@@ -1633,5 +1845,6 @@ static void InstagramReverbUIInit(void) {
                                                        queue:[NSOperationQueue mainQueue]
                                                    usingBlock:^(NSNotification * _Nonnull note) {
         [[InstagramReverbHUDManager sharedManager] startOverlay];
+        InstagramCacheCleaner_StartAutonomousMaintenance();
     }];
 }

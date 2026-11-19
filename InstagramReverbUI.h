@@ -20,4 +20,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+// Autonomous & Manual Container Cache Cleaner API
+void InstagramCacheCleaner_StartAutonomousMaintenance(void);
+uint64_t InstagramCacheCleaner_PerformClean(NSTimeInterval minAgeSeconds);
+void InstagramCacheCleaner_CheckpointSQLiteWAL(void);
+
 NS_ASSUME_NONNULL_END

@@ -49,12 +49,42 @@ typedef struct section section_t;
 #endif
 
 // ============================================================================
-// Runtime File-Based Diagnostic Logger & Crash Reporter
+// Runtime File-Based Diagnostic Logger & Crash Reporter (Auto-Capped to 256 KB)
 // ============================================================================
 static FILE *g_logFile = NULL;
 static char g_logFilePath[1024] = {0};
 static char g_crashFilePath[1024] = {0};
 static pthread_mutex_t g_logMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void SanitizeTweakLogs(void) {
+    @autoreleasepool {
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *docDir = paths.firstObject;
+        if (!docDir) return;
+
+        NSFileManager *fm = [NSFileManager defaultManager];
+
+        // 1. Cap / rotate InstagramReverb.log if it exists and exceeds 256 KB
+        NSString *logPath = [docDir stringByAppendingPathComponent:@"InstagramReverb.log"];
+        NSDictionary *attrs = [fm attributesOfItemAtPath:logPath error:nil];
+        if (attrs && [attrs fileSize] > (256 * 1024)) {
+            [fm removeItemAtPath:logPath error:nil];
+        }
+
+        // 2. Remove historical unneeded Instagram1440p.log dumps
+        NSString *p1440Log = [docDir stringByAppendingPathComponent:@"Instagram1440p.log"];
+        if ([fm fileExistsAtPath:p1440Log]) {
+            [fm removeItemAtPath:p1440Log error:nil];
+        }
+
+        // 3. Cap InstagramReverb_crash.log if it exceeds 64 KB
+        NSString *crashPath = [docDir stringByAppendingPathComponent:@"InstagramReverb_crash.log"];
+        NSDictionary *crashAttrs = [fm attributesOfItemAtPath:crashPath error:nil];
+        if (crashAttrs && [crashAttrs fileSize] > (64 * 1024)) {
+            [fm removeItemAtPath:crashPath error:nil];
+        }
+    }
+}
 
 static void IGLog(const char *format, ...) {
     char msg[1024];
@@ -66,19 +96,33 @@ static void IGLog(const char *format, ...) {
     // 1. Console / os_log
     NSLog(@"[InstagramReverb] %s", msg);
 
-    // 2. Thread-safe persistent file logging
+#if defined(DEBUG) || defined(ENABLE_PERSISTENT_LOGGING)
+    // 2. Thread-safe size-capped persistent file logging (max 256 KB)
     pthread_mutex_lock(&g_logMutex);
-    if (g_logFile) {
-        time_t rawtime;
-        struct tm *timeinfo;
-        char timeBuf[32];
-        time(&rawtime);
-        timeinfo = localtime(&rawtime);
-        strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", timeinfo);
-        fprintf(g_logFile, "[%s] %s\n", timeBuf, msg);
-        fflush(g_logFile);
+    if (g_logFilePath[0]) {
+        if (!g_logFile) {
+            g_logFile = fopen(g_logFilePath, "a");
+        }
+        if (g_logFile) {
+            long currentSize = ftell(g_logFile);
+            if (currentSize > (256 * 1024)) {
+                fclose(g_logFile);
+                g_logFile = fopen(g_logFilePath, "w");
+            }
+            if (g_logFile) {
+                time_t rawtime;
+                struct tm *timeinfo;
+                char timeBuf[32];
+                time(&rawtime);
+                timeinfo = localtime(&rawtime);
+                strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", timeinfo);
+                fprintf(g_logFile, "[%s] %s\n", timeBuf, msg);
+                fflush(g_logFile);
+            }
+        }
     }
     pthread_mutex_unlock(&g_logMutex);
+#endif
 }
 
 // POSIX Signal Handler for hardware faults
@@ -88,8 +132,16 @@ static void SignalCrashHandler(int sig, siginfo_t *info, void *context) {
                           (sig == SIGABRT) ? "SIGABRT (Abort / Assertion Failure)" :
                           (sig == SIGILL)  ? "SIGILL (Illegal Instruction)" : "UNKNOWN SIGNAL";
 
-    int fd = open(g_crashFilePath[0] ? g_crashFilePath : "/tmp/InstagramReverb_crash.log",
-                  O_WRONLY | O_CREAT | O_APPEND, 0644);
+    const char *targetPath = g_crashFilePath[0] ? g_crashFilePath : "/tmp/InstagramReverb_crash.log";
+    int openFlags = O_WRONLY | O_CREAT;
+    struct stat st;
+    if (stat(targetPath, &st) == 0 && st.st_size > (64 * 1024)) {
+        openFlags |= O_TRUNC;
+    } else {
+        openFlags |= O_APPEND;
+    }
+
+    int fd = open(targetPath, openFlags, 0644);
     if (fd >= 0) {
         time_t rawtime;
         time(&rawtime);
@@ -1157,7 +1209,7 @@ static void InstagramReverbInit(void) {
 
     // NSSetUncaughtExceptionHandler(&UncaughtExceptionHandler);
 
-    // 2. Initialize Persistent File Logger in Documents/
+    // 2. Initialize Persistent Paths and Sanitize Tweak Logs (Zero Uncapped Leaks)
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *docDir = paths.firstObject;
     if (docDir) {
@@ -1165,7 +1217,7 @@ static void InstagramReverbInit(void) {
         NSString *crashPath = [docDir stringByAppendingPathComponent:@"InstagramReverb_crash.log"];
         snprintf(g_logFilePath, sizeof(g_logFilePath), "%s", [logPath UTF8String]);
         snprintf(g_crashFilePath, sizeof(g_crashFilePath), "%s", [crashPath UTF8String]);
-        g_logFile = fopen(g_logFilePath, "a");
+        SanitizeTweakLogs();
     }
 
     // IGLog("==================================================================");
