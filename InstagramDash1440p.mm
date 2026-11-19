@@ -30,6 +30,11 @@ static NSString *g_currentResolution = @"";
 static NSString *g_currentRepresentationId = @"ready";
 static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
 
+
+//battery log
+
+static dispatch_source_t g_batteryLoggerTimer = nil;
+
 // ============================================================================
 // Zero-Overhead Logging Stub (Disabled for Stutter-Free 1440p Playback)
 // ============================================================================
@@ -1360,6 +1365,54 @@ static void ApplyAllDash1440pSwizzles(void) {
     pthread_mutex_unlock(&s_mutex);
 }
 
+static void StartBatteryLogger(void)
+{
+    [UIDevice currentDevice].batteryMonitoringEnabled = YES;
+
+    if (g_batteryLoggerTimer) {
+        return;
+    }
+
+    dispatch_queue_t queue =
+        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0);
+
+    g_batteryLoggerTimer =
+        dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,
+                               0,
+                               0,
+                               queue);
+
+    dispatch_source_set_timer(
+        g_batteryLoggerTimer,
+        dispatch_time(DISPATCH_TIME_NOW, 0),
+        30ull * NSEC_PER_SEC,
+        5ull * NSEC_PER_SEC);
+
+    dispatch_source_set_event_handler(g_batteryLoggerTimer, ^{
+
+        UIDevice *device = [UIDevice currentDevice];
+
+        float batteryPercent =
+            device.batteryLevel * 100.0f;
+
+        UIApplicationState state =
+            UIApplication.sharedApplication.applicationState;
+
+        NSString *stateString =
+            (state == UIApplicationStateActive)
+                ? @"FOREGROUND"
+                : @"BACKGROUND";
+
+        NSLog(@"[Dash1440p] %@ | Battery=%.0f%% | Enabled=%d | LPM=%d",
+              stateString,
+              batteryPercent,
+              InstagramDash1440p_IsEnabled(),
+              [NSProcessInfo processInfo].lowPowerModeEnabled);
+    });
+
+    dispatch_resume(g_batteryLoggerTimer);
+}
+
 void InstagramDash1440p_Init(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -1376,9 +1429,10 @@ void InstagramDash1440p_Init(void) {
             }
         }
         InstagramWifiSpoofer_SetEnabled(g_dashMode != InstagramDash1440pMode_Disabled);
-
+        
         HookVTDecompressionSessionCreateOnce();
         ApplyAllDash1440pSwizzles();
+        StartBatteryLogger();
 
         [[NSNotificationCenter defaultCenter]
             addObserverForName:UIApplicationDidEnterBackgroundNotification
