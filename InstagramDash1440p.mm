@@ -1,5 +1,4 @@
-// 1440p-new
-
+// old stable 1440p
 
 // InstagramDash1440p.mm
 // Ultra High-Definition (1440p / 2K) VP9 DASH Video Streaming Engine for Instagram
@@ -400,64 +399,21 @@ static void CacheRepresentationMetadata(id rep) {
     if (!g_repMetadataCache) {
         g_repMetadataCache = [[NSMutableDictionary alloc] init];
     }
-    NSString *desc =
-        [actual respondsToSelector:@selector(description)]
-            ? [actual description]
-            : nil;
-
-    BOOL is1440Cached = IsRepresentation1440p(
-        sz.width,
-        sz.height,
-        repId,
-        tag,
-        qLabel,
-        bw,
-        desc);
-
-    BOOL is1080Cached =
-        !is1440Cached &&
-        IsRepresentation1080p(
-            sz.width,
-            sz.height,
-            repId,
-            tag,
-            qLabel,
-            desc);
-
     g_repMetadataCache[repId] = @{
         @"width": @(sz.width),
         @"height": @(sz.height),
         @"tag": tag,
         @"qualityLabel": qLabel,
-        @"bw": @(bw),
-        @"is1440": @(is1440Cached),
-        @"is1080": @(is1080Cached)
+        @"bw": @(bw)
     };
     pthread_mutex_unlock(&g_cacheMutex);
 }
 
-    static __weak id g_activePlayingPlayer = nil;
-    static pthread_mutex_t g_playerMutex = PTHREAD_MUTEX_INITIALIZER;
+static __weak id g_activePlayingPlayer = nil;
+static pthread_mutex_t g_playerMutex = PTHREAD_MUTEX_INITIALIZER;
 
-    static CFAbsoluteTime g_lastTelemetryUpdate = 0;
-    static pthread_mutex_t g_telemetryMutex = PTHREAD_MUTEX_INITIALIZER;
-
-    static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrideRepId, NSString *overrideTag) {
-
+static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrideRepId, NSString *overrideTag) {
     if (!player) return;
-
-    pthread_mutex_lock(&g_telemetryMutex);
-
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-
-    if ((now - g_lastTelemetryUpdate) < 0.25) {
-        pthread_mutex_unlock(&g_telemetryMutex);
-        return;
-    }
-
-    g_lastTelemetryUpdate = now;
-
-    pthread_mutex_unlock(&g_telemetryMutex);
 
     // Check if the player is currently playing
     BOOL isPlaying = NO;
@@ -615,64 +571,18 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
         NSString *qualityLabel = GetRepresentationQualityLabel(rep);
 
         // Fast lightweight check first (zero description formatting)
-        BOOL is1440 = NO;
-        BOOL is1080 = NO;
-
-        pthread_mutex_lock(&g_cacheMutex);
-
-        NSDictionary *cached =
-            repId ? g_repMetadataCache[repId] : nil;
-
-        if (cached) {
-            is1440 = [cached[@"is1440"] boolValue];
-            is1080 = [cached[@"is1080"] boolValue];
+        BOOL is1440 = IsRepresentation1440p(sz.width, sz.height, repId, encodingTag, qualityLabel, bw, nil);
+        if (!is1440 && [rep respondsToSelector:@selector(description)]) {
+            NSString *desc = [rep description];
+            is1440 = IsRepresentation1440p(sz.width, sz.height, repId, encodingTag, qualityLabel, bw, desc);
         }
 
-        pthread_mutex_unlock(&g_cacheMutex);
-
-        if (!cached) {
-
-            is1440 = IsRepresentation1440p(
-                sz.width,
-                sz.height,
-                repId,
-                encodingTag,
-                qualityLabel,
-                bw,
-                nil);
-
-            if (!is1440 && [rep respondsToSelector:@selector(description)]) {
+        BOOL is1080 = NO;
+        if (!is1440) {
+            is1080 = IsRepresentation1080p(sz.width, sz.height, repId, encodingTag, qualityLabel, nil);
+            if (!is1080 && [rep respondsToSelector:@selector(description)]) {
                 NSString *desc = [rep description];
-                is1440 = IsRepresentation1440p(
-                    sz.width,
-                    sz.height,
-                    repId,
-                    encodingTag,
-                    qualityLabel,
-                    bw,
-                    desc);
-            }
-
-            if (!is1440) {
-
-                is1080 = IsRepresentation1080p(
-                    sz.width,
-                    sz.height,
-                    repId,
-                    encodingTag,
-                    qualityLabel,
-                    nil);
-
-                if (!is1080 && [rep respondsToSelector:@selector(description)]) {
-                    NSString *desc = [rep description];
-                    is1080 = IsRepresentation1080p(
-                        sz.width,
-                        sz.height,
-                        repId,
-                        encodingTag,
-                        qualityLabel,
-                        desc);
-                }
+                is1080 = IsRepresentation1080p(sz.width, sz.height, repId, encodingTag, qualityLabel, desc);
             }
         }
 
@@ -1470,7 +1380,6 @@ void InstagramDash1440p_Init(void) {
         HookVTDecompressionSessionCreateOnce();
         ApplyAllDash1440pSwizzles();
 
-                // Disable tweak while Instagram is backgrounded
         [[NSNotificationCenter defaultCenter]
             addObserverForName:UIApplicationDidEnterBackgroundNotification
                         object:nil
@@ -1489,7 +1398,7 @@ void InstagramDash1440p_Init(void) {
 
             InstagramDash1440p_SetEnabled(YES);
         }];
-/*
+
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
                                                            object:nil
                                                             queue:[NSOperationQueue mainQueue]
@@ -1497,12 +1406,10 @@ void InstagramDash1440p_Init(void) {
             DashLog(@"UIApplicationDidFinishLaunchingNotification received, refreshing swizzles");
             ApplyAllDash1440pSwizzles();
         }];
-        */
-/*
+
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             ApplyAllDash1440pSwizzles();
         });
-        */
     });
 }
 
