@@ -1365,6 +1365,50 @@ static void ApplyAllDash1440pSwizzles(void) {
     pthread_mutex_unlock(&s_mutex);
 }
 
+static NSString *BatteryLogPath(void)
+{
+    NSArray *paths =
+        NSSearchPathForDirectoriesInDomains(
+            NSDocumentDirectory,
+            NSUserDomainMask,
+            YES);
+
+    NSString *docDir =
+        paths.firstObject ?: NSTemporaryDirectory();
+
+    return [docDir stringByAppendingPathComponent:@"InstagramDash1440pBattery.log"];
+}
+
+static void AppendBatteryLogLine(NSString *line)
+{
+    if (!line) return;
+
+    NSString *path = BatteryLogPath();
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    if (![fm fileExistsAtPath:path]) {
+        [line writeToFile:path
+               atomically:YES
+                 encoding:NSUTF8StringEncoding
+                    error:nil];
+        return;
+    }
+
+    NSFileHandle *fh =
+        [NSFileHandle fileHandleForWritingAtPath:path];
+
+    if (!fh) return;
+
+    [fh seekToEndOfFile];
+
+    NSData *data =
+        [line dataUsingEncoding:NSUTF8StringEncoding];
+
+    [fh writeData:data];
+    [fh closeFile];
+}
+
 static void StartBatteryLogger(void)
 {
     [UIDevice currentDevice].batteryMonitoringEnabled = YES;
@@ -1403,11 +1447,25 @@ static void StartBatteryLogger(void)
                 ? @"FOREGROUND"
                 : @"BACKGROUND";
 
-        NSLog(@"[Dash1440p] %@ | Battery=%.0f%% | Enabled=%d | LPM=%d",
-              stateString,
-              batteryPercent,
-              InstagramDash1440p_IsEnabled(),
-              [NSProcessInfo processInfo].lowPowerModeEnabled);
+        NSDateFormatter *formatter =
+            [[NSDateFormatter alloc] init];
+
+        formatter.dateFormat =
+            @"yyyy-MM-dd HH:mm:ss";
+
+        NSString *timestamp =
+            [formatter stringFromDate:[NSDate date]];
+
+        NSString *line =
+            [NSString stringWithFormat:
+                @"%@ | %@ | Battery=%.0f%% | Enabled=%d | LPM=%d\n",
+                timestamp,
+                stateString,
+                batteryPercent,
+                InstagramDash1440p_IsEnabled(),
+                [NSProcessInfo processInfo].lowPowerModeEnabled];
+
+        AppendBatteryLogLine(line);
     });
 
     dispatch_resume(g_batteryLoggerTimer);
@@ -1452,6 +1510,7 @@ void InstagramDash1440p_Init(void) {
 
             InstagramDash1440p_SetEnabled(YES);
         }];
+        /*
 
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
                                                            object:nil
@@ -1464,6 +1523,7 @@ void InstagramDash1440p_Init(void) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             ApplyAllDash1440pSwizzles();
         });
+        */
     });
 }
 
