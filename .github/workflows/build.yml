@@ -12,6 +12,16 @@ on:
       - 'Makefile'
       - '.github/workflows/build.yml'
   workflow_dispatch:
+    inputs:
+      runner:
+        description: 'macOS Runner Image'
+        required: false
+        default: 'macos-15'
+        type: choice
+        options:
+          - macos-15
+          - macos-14
+          - macos-latest
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,7 +32,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: ${{ github.event.inputs.runner || 'macos-15' }}
     timeout-minutes: 20
     steps:
       - name: Checkout Repository

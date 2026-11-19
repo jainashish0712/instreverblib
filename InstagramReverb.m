@@ -31,6 +31,8 @@
 #import <unistd.h>
 #import <fcntl.h>
 #import <time.h>
+#import <sys/stat.h>
+#import <sys/types.h>
 #import "InstagramReverb.h"
 #import "InstagramWifiSpoofer.h"
 #import "InstagramDash1440p.h"

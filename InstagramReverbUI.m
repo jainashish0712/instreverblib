@@ -946,10 +946,10 @@ void InstagramCacheCleaner_StartAutonomousMaintenance(void) {
     y += sliderH + 5.0f;
 
     // 4. Action Buttons: Reset Defaults & Clean Cache (Side-by-side, 20pt height, 0 dead gap)
-    CGFloat btnGap = 4.0f;
-    CGFloat halfBtnW = (w - btnGap) * 0.5f;
+    CGFloat actionBtnGap = 4.0f;
+    CGFloat halfBtnW = (w - actionBtnGap) * 0.5f;
     _resetBtn.frame = CGRectMake(pad, y, halfBtnW, 20.0f);
-    _cleanCacheBtn.frame = CGRectMake(pad + halfBtnW + btnGap, y, halfBtnW, 20.0f);
+    _cleanCacheBtn.frame = CGRectMake(pad + halfBtnW + actionBtnGap, y, halfBtnW, 20.0f);
 }
 
 - (void)refreshValues {
@@ -1404,7 +1404,7 @@ static float QueryCurrentGPU(void) {
 static PerfNetStats QueryCurrentNetStats(void) {
     PerfNetStats stats = {0, 0, 0, 0};
     struct ifaddrs *interfaces = NULL;
-    if ((InstagramWifiSpoofer_GetRawIfAddrs ? InstagramWifiSpoofer_GetRawIfAddrs(&interfaces) : getifaddrs(&interfaces)) == 0 && interfaces) {
+    if (InstagramWifiSpoofer_GetRawIfAddrs(&interfaces) == 0 && interfaces) {
         struct ifaddrs *ifa = interfaces;
         while (ifa) {
             if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_LINK) {
