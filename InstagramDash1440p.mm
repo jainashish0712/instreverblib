@@ -720,6 +720,51 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
 }
 
 // ============================================================================
+// Per-Playlist Selection Memoization
+// Caches the chosen target representation on the playlist (or rep-array) via an
+// associated object, keyed by mode, so SelectTargetRepresentation runs once per
+// (owner, mode) instead of on every hooked getter / ABR tick. This restores the
+// memoization the stable rewrite dropped (measured cost: ~219k scans / ~10.5s CPU).
+// ============================================================================
+
+static const char kDashTargetRepKey = 0;
+
+@interface InstagramDashPlaylistCacheEntry : NSObject
+@property (nonatomic, assign) InstagramDash1440pMode mode;
+@property (nonatomic, strong) id targetRep;
+@property (nonatomic, strong) NSArray *representations;  // == @[ targetRep ]
+@end
+@implementation InstagramDashPlaylistCacheEntry
+@end
+
+// Returns the memoized entry for `owner` (a playlist or a representations array),
+// populating it from `origReps` on a miss. Never re-queries the owner — the caller
+// passes the representations it already fetched, so no new hooked message sends are
+// introduced (avoids the autopsy-#1 recursion). Thread-safe via associated objects:
+// a concurrent populate just recomputes the same result.
+static InstagramDashPlaylistCacheEntry *PlaylistCacheFor(id owner, NSArray *origReps, BOOL isPrefetch) {
+    if (!owner) return nil;
+    InstagramDash1440pMode mode = InstagramDash1440p_GetMode();
+    InstagramDashPlaylistCacheEntry *entry = objc_getAssociatedObject(owner, &kDashTargetRepKey);
+    if (entry && entry.mode == mode) {
+        return entry;  // cache hit
+    }
+    if (!origReps || ![origReps isKindOfClass:[NSArray class]] || origReps.count == 0) {
+        return entry;  // cannot (re)populate; return stale entry or nil
+    }
+    id chosen = SelectTargetRepresentation(origReps, isPrefetch);  // the one scan per (owner, mode)
+    if (!chosen) {
+        return entry;
+    }
+    entry = [[InstagramDashPlaylistCacheEntry alloc] init];
+    entry.mode = mode;
+    entry.targetRep = chosen;
+    entry.representations = @[ chosen ];
+    objc_setAssociatedObject(owner, &kDashTargetRepKey, entry, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return entry;
+}
+
+// ============================================================================
 // Objective-C Swizzle Helpers & Method Introspection
 // ============================================================================
 
@@ -930,9 +975,20 @@ static id (*orig_ABR_selectQualitySeqIndices)(id self, SEL _cmd, NSArray *repres
 static id Hook_ABR_SelectQualitySeqIndices(id self, SEL _cmd, NSArray *representations, std::vector<int> seqIndices, double bandwidth) {
     DashLog(@"[FNFDashABRQualitySelector] _selectQualityFromRepresentations:sequenceIndices:... called with %lu reps", (unsigned long)representations.count);
     if (InstagramDash1440p_IsEnabled() && representations && [representations isKindOfClass:[NSArray class]] && representations.count > 0) {
-        id chosen = SelectTargetRepresentation(representations, NO);
-        if (chosen) {
-            return chosen;
+        // Prefer the playlist as cache owner (stable identity, shared with the getters' cache);
+        // fall back to memoizing on the representations array itself.
+        id owner = nil;
+        Ivar plIvar = class_getInstanceVariable([self class], "_playlist");
+        if (plIvar) {
+            id pl = object_getIvar(self, plIvar);
+            if (pl && [pl respondsToSelector:@selector(representationsForTrack:)]) {
+                owner = pl;
+            }
+        }
+        if (!owner) owner = representations;
+        InstagramDashPlaylistCacheEntry *entry = PlaylistCacheFor(owner, representations, NO);
+        if (entry && entry.targetRep) {
+            return entry.targetRep;
         }
     }
     if (orig_ABR_selectQualitySeqIndices) {
@@ -964,10 +1020,9 @@ static NSArray * Hook_Playlist_RepresentationsForTrack(id self, SEL _cmd, NSInte
         return origReps;
     }
 
-    id chosen = SelectTargetRepresentation(origReps, NO);
-    if (chosen) {
-        DashLog(@"[FNFDashPlaylist] representationsForTrack:0 filtered to target quality: %@", chosen);
-        return @[ chosen ];
+    InstagramDashPlaylistCacheEntry *entry = PlaylistCacheFor(self, origReps, NO);
+    if (entry && entry.representations) {
+        return entry.representations;
     }
     return origReps;
 }
@@ -984,10 +1039,9 @@ static NSArray * Hook_Playlist_AllRepresentationsForTrack(id self, SEL _cmd, NSI
         return origReps;
     }
 
-    id chosen = SelectTargetRepresentation(origReps, NO);
-    if (chosen) {
-        DashLog(@"[FNFDashPlaylist] allRepresentationsForTrack:0 filtered to target quality: %@", chosen);
-        return @[ chosen ];
+    InstagramDashPlaylistCacheEntry *entry = PlaylistCacheFor(self, origReps, NO);
+    if (entry && entry.representations) {
+        return entry.representations;
     }
     return origReps;
 }
@@ -1004,10 +1058,9 @@ static NSArray * Hook_Playlist_RepresentationsForVideoTrack(id self, SEL _cmd) {
         return origReps;
     }
 
-    id chosen = SelectTargetRepresentation(origReps, YES);
-    if (chosen) {
-        DashLog(@"[FNFDashPlaylist] _representationsForVideoTrack filtered to target quality: %@", chosen);
-        return @[ chosen ];
+    InstagramDashPlaylistCacheEntry *entry = PlaylistCacheFor(self, origReps, YES);
+    if (entry && entry.representations) {
+        return entry.representations;
     }
     return origReps;
 }
@@ -1029,10 +1082,10 @@ static id Hook_Playlist_DefaultRepresentationForTrack(id self, SEL _cmd, NSInteg
             reps = ((NSArray *(*)(id, SEL))objc_msgSend)(self, @selector(_representationsForVideoTrack));
         }
         if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
-            id chosen = SelectTargetRepresentation(reps, YES);
-            if (chosen) {
-                DashLog(@"[FNFDashPlaylist] defaultRepresentationForTrack:0 (Video) forced: %@", chosen);
-                return chosen;
+            InstagramDashPlaylistCacheEntry *entry = PlaylistCacheFor(self, reps, YES);
+            if (entry && entry.targetRep) {
+                DashLog(@"[FNFDashPlaylist] defaultRepresentationForTrack:0 (Video) forced: %@", entry.targetRep);
+                return entry.targetRep;
             }
         }
     }
@@ -1055,9 +1108,9 @@ static void Hook_Playlist_SetDefaultRepresentationTrack(id self, SEL _cmd, id re
             reps = ((NSArray *(*)(id, SEL, NSInteger))objc_msgSend)(self, @selector(allRepresentationsForTrack:), 0);
         }
         if (reps && [reps isKindOfClass:[NSArray class]] && reps.count > 0) {
-            id chosen = SelectTargetRepresentation(reps, YES);
-            if (chosen) {
-                rep = chosen;
+            InstagramDashPlaylistCacheEntry *entry = PlaylistCacheFor(self, reps, YES);
+            if (entry && entry.targetRep) {
+                rep = entry.targetRep;
             }
         }
     }
