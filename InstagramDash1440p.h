@@ -38,6 +38,9 @@ NSString *InstagramDash1440p_GetCurrentResolution(void);
 NSString *InstagramDash1440p_GetCurrentRepresentationId(void);
 NSString *InstagramDash1440p_GetLogFilePath(void);
 
+// [PROF] TEMPORARY — live CPU-profiling summary for the HUD; remove with the instrumentation.
+NSString *InstagramDash1440p_GetProfSummary(void);
+
 // Notification posted when active stream quality or representation ID changes
 extern NSString * const kInstagramDash1440pStateDidChangeNotification;
 
