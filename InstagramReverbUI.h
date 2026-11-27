@@ -18,6 +18,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)hideHUD;
 - (void)toggleHUD;
 
+// Toggle the floating badges (1440p pill + perf pill); returns YES if now hidden.
+// Also stops perf-pill polling when hidden (battery). Persists via "InstagramReverb_badgesHidden".
+- (BOOL)toggleBadges;
+
 @end
 
 // Autonomous & Manual Container Cache Cleaner API
