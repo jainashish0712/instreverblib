@@ -15,6 +15,9 @@
 #import <time.h>
 #import <dlfcn.h>
 #import <CoreMedia/CoreMedia.h>
+#import <mach/mach_time.h>
+#include <atomic>
+#include <stdio.h>
 #import "fishhook.h"
 #import "InstagramDash1440p.h"
 #import "InstagramWifiSpoofer.h"
@@ -33,6 +36,56 @@ static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
 // ============================================================================
 
 #define DashLog(...) do {} while(0)
+
+// ============================================================================
+// TEMPORARY CPU PROFILING  —  REMOVE AFTER MEASURING
+// Accumulates wall-time in the three suspected hot spots and flushes one
+// summary line to InstagramDash1440p_GetLogFilePath() at most once per 2s.
+// TO REMOVE: delete this whole block; rename SelectTargetRepresentation_impl
+// and PruneManifestXmlOrData_impl back (drop the "_impl" + delete their 8-line
+// wrappers); delete the counter lines marked "[PROF]" in the usesSoftwareDecoder
+// and VTDecompressionSessionCreate hooks.
+// ============================================================================
+static std::atomic<long long> g_profPruneCalls{0};
+static std::atomic<long long> g_profPruneTicks{0};
+static std::atomic<long long> g_profSelectCalls{0};
+static std::atomic<long long> g_profSelectTicks{0};
+static std::atomic<long long> g_profSwDecYes{0};
+static std::atomic<long long> g_profSwDecNo{0};
+static std::atomic<long long> g_profVTCalls{0};
+static std::atomic<long long> g_profVTErr{0};
+
+static mach_timebase_info_data_t g_profTB = {0, 0};
+static inline uint64_t ProfTicks(void) {
+    if (g_profTB.denom == 0) mach_timebase_info(&g_profTB);
+    return mach_absolute_time();
+}
+static inline double ProfTicksToMs(long long ticks) {
+    if (g_profTB.denom == 0) mach_timebase_info(&g_profTB);
+    return (double)ticks * (double)g_profTB.numer / (double)g_profTB.denom / 1.0e6;
+}
+static void ProfFlushIfDue(void) {
+    static std::atomic<long long> s_lastFlush{0};
+    long long now = (long long)ProfTicks();
+    long long last = s_lastFlush.load();
+    long long twoSecTicks = 2000000000LL * (g_profTB.denom ? g_profTB.denom : 1) /
+                            (g_profTB.numer ? g_profTB.numer : 1);
+    if (now - last < twoSecTicks) return;
+    if (!s_lastFlush.compare_exchange_strong(last, now)) return;
+
+    long long pc = g_profPruneCalls.load(), pt = g_profPruneTicks.load();
+    long long sc = g_profSelectCalls.load(), st = g_profSelectTicks.load();
+    long long swy = g_profSwDecYes.load(), swn = g_profSwDecNo.load();
+    long long vt = g_profVTCalls.load(), vte = g_profVTErr.load();
+    NSString *line = [NSString stringWithFormat:
+        @"[PROF] prune=%lld calls / %.1f ms (%.2f ms/call)  select=%lld calls / %.1f ms (%.3f ms/call)  swDecoder(real) yes=%lld no=%lld  VTcreate=%lld firstErr=%lld\n",
+        pc, ProfTicksToMs(pt), pc ? ProfTicksToMs(pt) / (double)pc : 0.0,
+        sc, ProfTicksToMs(st), sc ? ProfTicksToMs(st) / (double)sc : 0.0,
+        swy, swn, vt, vte];
+    NSString *path = InstagramDash1440p_GetLogFilePath();
+    FILE *f = fopen(path.UTF8String, "a");
+    if (f) { fputs(line.UTF8String, f); fclose(f); }
+}
 
 // ============================================================================
 // Public Control & Telemetry Interfaces
@@ -528,7 +581,7 @@ static void UpdateActivePlaybackTelemetryFromPlayer(id player, NSString *overrid
 // Core Resolution-First Target Representation Selector
 // ============================================================================
 
-static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) {
+static id SelectTargetRepresentation_impl(NSArray *representations, BOOL isPrefetch) {
     if (!representations || ![representations isKindOfClass:[NSArray class]] || representations.count == 0) {
         return nil;
     }
@@ -649,6 +702,15 @@ static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) 
     }
 
     return chosen;
+}
+
+static id SelectTargetRepresentation(NSArray *representations, BOOL isPrefetch) {
+    uint64_t t0 = ProfTicks();
+    id r = SelectTargetRepresentation_impl(representations, isPrefetch);
+    g_profSelectTicks.fetch_add((long long)(ProfTicks() - t0));
+    g_profSelectCalls.fetch_add(1);
+    ProfFlushIfDue();
+    return r;
 }
 
 // ============================================================================
@@ -861,7 +923,7 @@ static NSString *PruneManifestXml(NSString *xmlString) {
     }
 }
 
-static id PruneManifestXmlOrData(id xmlOrData) {
+static id PruneManifestXmlOrData_impl(id xmlOrData) {
     if (!xmlOrData) return nil;
     if ([xmlOrData isKindOfClass:[NSString class]]) {
         return PruneManifestXml((NSString *)xmlOrData);
@@ -876,6 +938,15 @@ static id PruneManifestXmlOrData(id xmlOrData) {
         }
     }
     return xmlOrData;
+}
+
+static id PruneManifestXmlOrData(id xmlOrData) {
+    uint64_t t0 = ProfTicks();
+    id r = PruneManifestXmlOrData_impl(xmlOrData);
+    g_profPruneTicks.fetch_add((long long)(ProfTicks() - t0));
+    g_profPruneCalls.fetch_add(1);
+    ProfFlushIfDue();
+    return r;
 }
 
 // ----------------------------------------------------------------------------
@@ -1268,6 +1339,7 @@ static OSStatus Hook_VTDecompressionSessionCreate(
     const void *outputCallback,
     VTDecompressionSessionRef *decompressionSessionOut) {
 
+    g_profVTCalls.fetch_add(1);   // [PROF]
     CFMutableDictionaryRef decoderSpec = NULL;
     if (videoDecoderSpecification) {
         decoderSpec = CFDictionaryCreateMutableCopy(allocator, 0, videoDecoderSpecification);
@@ -1290,6 +1362,7 @@ static OSStatus Hook_VTDecompressionSessionCreate(
             outputCallback,
             decompressionSessionOut);
     }
+    if (status != noErr) g_profVTErr.fetch_add(1);   // [PROF] forced-HW first attempt failed
 
     // Resilient fallback: If forcing hardware decoder fails, retry with original specification
     // to prevent VideoToolbox from failing completely and dropping into software CPU decoding
@@ -1373,6 +1446,10 @@ static id Hook_FNFDecompressionSessionForVP9X_Init(id self, SEL _cmd, id delegat
 static BOOL (*orig_vp9x_usesSoftwareDecoder)(id self, SEL _cmd) = NULL;
 
 static BOOL Hook_FNFDecompressionSessionForVP9X_UsesSoftwareDecoder(id self, SEL _cmd) {
+    if (orig_vp9x_usesSoftwareDecoder) {   // [PROF] log the real (pre-override) decoder mode
+        BOOL realSW = orig_vp9x_usesSoftwareDecoder(self, _cmd);
+        (realSW ? g_profSwDecYes : g_profSwDecNo).fetch_add(1);
+    }
     // Hardware accelerated via VideoToolbox
     return NO;
 }
