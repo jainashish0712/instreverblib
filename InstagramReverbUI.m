@@ -655,6 +655,7 @@ void InstagramCacheCleaner_StartAutonomousMaintenance(void) {
 // 4. Action Buttons (Reset Defaults & Clean Cache)
 @property (nonatomic, strong) UIButton *resetBtn;
 @property (nonatomic, strong) UIButton *cleanCacheBtn;
+@property (nonatomic, strong) UIButton *badgesBtn;
 @property (nonatomic, copy) void (^closeHandler)(void);
 
 - (void)refreshValues;
@@ -832,6 +833,17 @@ void InstagramCacheCleaner_StartAutonomousMaintenance(void) {
         [_cleanCacheBtn addTarget:self action:@selector(cleanCacheTapped) forControlEvents:UIControlEventTouchUpInside];
         [_contentContainer addSubview:_cleanCacheBtn];
 
+        _badgesBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        BOOL badgesHidden0 = [[NSUserDefaults standardUserDefaults] boolForKey:@"InstagramReverb_badgesHidden"];
+        [_badgesBtn setTitle:(badgesHidden0 ? @"Badges Off" : @"Badges On") forState:UIControlStateNormal];
+        [_badgesBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
+        _badgesBtn.titleLabel.font = [UIFont systemFontOfSize:8.5f weight:UIFontWeightMedium];
+        _badgesBtn.titleLabel.adjustsFontSizeToFitWidth = YES;
+        _badgesBtn.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.07f];
+        _badgesBtn.layer.cornerRadius = 4.5f;
+        [_badgesBtn addTarget:self action:@selector(badgesTapped) forControlEvents:UIControlEventTouchUpInside];
+        [_contentContainer addSubview:_badgesBtn];
+
         // Draggable Pan Gesture for HUD (without interfering with sliders or buttons)
         UIPanGestureRecognizer *hudPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         hudPan.delegate = self;
@@ -945,11 +957,12 @@ void InstagramCacheCleaner_StartAutonomousMaintenance(void) {
     _roomSlider.frame = CGRectMake(pad, y, w, sliderH);
     y += sliderH + 5.0f;
 
-    // 4. Action Buttons: Reset Defaults & Clean Cache (Side-by-side, 20pt height, 0 dead gap)
+    // 4. Action Buttons: Reset / Clean Cache / Badges (3-up, single line, narrower; titles autoshrink)
     CGFloat actionBtnGap = 4.0f;
-    CGFloat halfBtnW = (w - actionBtnGap) * 0.5f;
-    _resetBtn.frame = CGRectMake(pad, y, halfBtnW, 20.0f);
-    _cleanCacheBtn.frame = CGRectMake(pad + halfBtnW + actionBtnGap, y, halfBtnW, 20.0f);
+    CGFloat thirdBtnW = (w - actionBtnGap * 2.0f) / 3.0f;
+    _resetBtn.frame = CGRectMake(pad, y, thirdBtnW, 20.0f);
+    _cleanCacheBtn.frame = CGRectMake(pad + thirdBtnW + actionBtnGap, y, thirdBtnW, 20.0f);
+    _badgesBtn.frame = CGRectMake(pad + (thirdBtnW + actionBtnGap) * 2.0f, y, thirdBtnW, 20.0f);
 }
 
 - (void)refreshValues {
@@ -1101,6 +1114,13 @@ void InstagramCacheCleaner_StartAutonomousMaintenance(void) {
             });
         });
     });
+}
+
+- (void)badgesTapped {
+    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [feedback impactOccurred];
+    BOOL hidden = [[InstagramReverbHUDManager sharedManager] toggleBadges];
+    [self.badgesBtn setTitle:(hidden ? @"Badges Off" : @"Badges On") forState:UIControlStateNormal];
 }
 
 - (void)closeTapped {
@@ -1751,6 +1771,12 @@ static NSString *FormatDataRate(double bytesPerSec) {
             [container addSubview:self.perfPill];
         }
 
+        // Apply the saved "badges hidden" preference (and stop perf polling when hidden → battery).
+        BOOL badgesHidden = [[NSUserDefaults standardUserDefaults] boolForKey:@"InstagramReverb_badgesHidden"];
+        self.dashPill.hidden = badgesHidden;
+        self.perfPill.hidden = badgesHidden;
+        if (badgesHidden) [self.perfPill stopPolling];
+
         static BOOL sGestureAdded = NO;
         if (!sGestureAdded) {
             UITapGestureRecognizer *twoFingerTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleHUD)];
@@ -1770,6 +1796,20 @@ static NSString *FormatDataRate(double bytesPerSec) {
     } else {
         [self showHUD];
     }
+}
+
+- (BOOL)toggleBadges {
+    BOOL hidden = !self.dashPill.hidden;   // target state: if shown now, hide
+    self.dashPill.hidden = hidden;
+    self.perfPill.hidden = hidden;
+    if (hidden) {
+        [self.perfPill stopPolling];       // also stops the 2s CPU/GPU/net sampling → saves battery
+    } else {
+        [self.perfPill startPolling];
+        [self.perfPill refreshMetrics];
+    }
+    [[NSUserDefaults standardUserDefaults] setBool:hidden forKey:@"InstagramReverb_badgesHidden"];
+    return hidden;
 }
 
 - (void)showHUD {
