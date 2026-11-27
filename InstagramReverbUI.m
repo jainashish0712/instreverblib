@@ -1539,7 +1539,9 @@ static NSString *FormatDataRate(double bytesPerSec) {
         }
 
         NSString *displayText = nil;
-        if (mode == 1) {
+        if (mode == 2) {
+            displayText = InstagramDash1440p_GetProfSummary();   // [PROF] temporary readout
+        } else if (mode == 1) {
             if (gpu >= 0.0f) {
                 displayText = [NSString stringWithFormat:@"C:%.0f%% G:%.0f%% %@", cpu, gpu, FormatDataRate(MAX(wifiRate, cellRate))];
             } else {
@@ -1557,6 +1559,7 @@ static NSString *FormatDataRate(double bytesPerSec) {
             self.lastNetStats = currentNet;
             self.lastPollTimestamp = now;
             self.titleLabel.text = displayText;
+            self.titleLabel.lineBreakMode = (mode == 2) ? NSLineBreakByTruncatingTail : NSLineBreakByTruncatingMiddle;   // [PROF] keep the head (select+swDec) visible
 
             CGSize fit = [self.titleLabel sizeThatFits:CGSizeMake(360.0f, 20.0f)];
             CGFloat targetWidth = MAX(110.0f, MIN(360.0f, fit.width + 26.0f));
@@ -1578,7 +1581,7 @@ static NSString *FormatDataRate(double bytesPerSec) {
         self.isDimmed = NO;
         return;
     }
-    self.displayMode = (self.displayMode == 0) ? 1 : 0;
+    self.displayMode = (self.displayMode + 1) % 3;   // 0=full, 1=compact, 2=[PROF] (temporary)
     UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [feedback impactOccurred];
     [self refreshMetrics];
