@@ -814,7 +814,7 @@ void InstagramCacheCleaner_StartAutonomousMaintenance(void) {
 
         // 4. Action Buttons: Reset Defaults & Clean Cache (Side-by-side)
         _resetBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        [_resetBtn setTitle:@"Reset Defaults" forState:UIControlStateNormal];
+        [_resetBtn setTitle:@"Reset" forState:UIControlStateNormal];
         [_resetBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
         _resetBtn.titleLabel.font = [UIFont systemFontOfSize:8.5f weight:UIFontWeightMedium];
         _resetBtn.titleLabel.adjustsFontSizeToFitWidth = YES;
@@ -824,7 +824,7 @@ void InstagramCacheCleaner_StartAutonomousMaintenance(void) {
         [_contentContainer addSubview:_resetBtn];
 
         _cleanCacheBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        [_cleanCacheBtn setTitle:@"Clean Cache" forState:UIControlStateNormal];
+        [_cleanCacheBtn setTitle:@"Clean" forState:UIControlStateNormal];
         [_cleanCacheBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
         _cleanCacheBtn.titleLabel.font = [UIFont systemFontOfSize:8.5f weight:UIFontWeightMedium];
         _cleanCacheBtn.titleLabel.adjustsFontSizeToFitWidth = YES;
@@ -1108,7 +1108,7 @@ void InstagramCacheCleaner_StartAutonomousMaintenance(void) {
             [successFeedback impactOccurred];
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [strongSelf.cleanCacheBtn setTitle:@"Clean Cache" forState:UIControlStateNormal];
+                [strongSelf.cleanCacheBtn setTitle:@"Clean" forState:UIControlStateNormal];
                 [strongSelf.cleanCacheBtn setTitleColor:[UIColor colorWithWhite:0.75f alpha:1.0f] forState:UIControlStateNormal];
                 strongSelf.cleanCacheBtn.enabled = YES;
             });
@@ -1825,12 +1825,12 @@ static NSString *FormatDataRate(double bytesPerSec) {
         CGRect winBounds = container.bounds;
 
         // Compact Mini-Widget Layout:
-        // Reduced overall width (180pt) & reduced snug height (164pt, 0 dead gap underneath)
+        // Narrower width (165pt) & snug height (160pt) — action buttons flush to bottom, no dead gap.
         CGFloat screenW = winBounds.size.width;
         CGFloat screenH = winBounds.size.height;
         CGFloat rightMargin = 10.0f;
-        CGFloat hudW = 180.0f;
-        CGFloat hudH = 164.0f;
+        CGFloat hudW = 165.0f;
+        CGFloat hudH = 160.0f;
         CGFloat hudX = screenW - hudW - rightMargin; // Right-hand corner docked
         CGFloat hudY = screenH - hudH - 100.0f;      // Bottom thumb sweep zone above tab bar
 
